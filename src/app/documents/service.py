@@ -19,7 +19,7 @@ class DocumentsService(BaseService):
         self.user_service = UsersService(db)
 
     def find_documents_by_user_id(self, user_id: str):
-        return self.dao.find({"user._id": user_id})
+        return self.dao.find({"created_by._id": user_id})
     
     def find_document(
         self,
