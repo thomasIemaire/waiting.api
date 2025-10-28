@@ -1,0 +1,11 @@
+venv/
+.venv/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.env
+src/static/agents/
+src/public/
+flask.log
+run.log
