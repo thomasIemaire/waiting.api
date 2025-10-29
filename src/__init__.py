@@ -13,7 +13,7 @@ def create_app(config_object: Type[DefaultConfig] = DefaultConfig) -> Flask:
 
     cors.init_app(
         app,
-        resources={r"/api/*": {"origins": ["http://localhost:4200", "http://127.0.0.1:4200"]}},
+        resources={r"/api/*": {"origins": ["https://sardine-app.sendoc.fr", "http://localhost:4200", "http://127.0.0.1:4200"]}},
         allow_headers=["Content-Type", "Authorization"],
         expose_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
