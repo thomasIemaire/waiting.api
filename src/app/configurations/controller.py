@@ -12,7 +12,7 @@ def create_configurations_router(db: Database) -> Blueprint:
     @bp.get("/")
     @jwt_required()
     def find_configurations():
-        docs = service.dao.find_all()
+        docs = service.find_all()
         if not docs:
             return json_error("Not found", 404)
         return jsonify(docs), 200
@@ -29,8 +29,9 @@ def create_configurations_router(db: Database) -> Blueprint:
     @bp.get("/<id>")
     @jwt_required()
     def get_configuration(id):
-        doc = service.get_document(id=id)
-        if not doc:
+        try:
+            doc = service.get_configuration(config_id=id)
+        except ValueError:
             return json_error("Not found", 404)
         return jsonify(doc), 200
 

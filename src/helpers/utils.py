@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 from flask import jsonify
-import hashlib, base64, uuid, hmac
+import hashlib
+import base64
+import uuid
+import hmac
 from datetime import datetime, timezone
 
 def json_error(message: str, status: int = 400) -> Tuple[Any, int]:
@@ -30,7 +33,7 @@ def verify_password(password: str, hashed_password: str, apikey: str) -> bool:
 def get_current_time() -> datetime:
     return datetime.now(timezone.utc)
 
-def is_integer(value: any) -> bool:
+def is_integer(value: Any) -> bool:
     try:
         int(value)
         return True

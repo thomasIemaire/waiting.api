@@ -24,26 +24,30 @@ class ModelsService(BaseService):
         return self.dao.serialize(models)
 
     def create(self, user_id: str, model_data: dict) -> ObjectId:
-        model_name = model_data.get("name", None)
+        model_name = (model_data.get("name") or "").strip()
         if not model_name:
             raise ValueError("Le nom du modèle est requis")
 
-        model_reference = model_data.get("reference", None)
+        model_reference = (model_data.get("reference") or "").strip()
         if not model_reference:
             raise ValueError("La référence du modèle est requise")
-        
-        model_version = self.document_exists(query={
-            "reference": model_reference
-        })
-        if model_version:
+
+        if self.document_exists(query={"reference": model_reference}):
             raise ValueError("La référence du modèle existe déjà")
 
-        user = self.user_service.get_document(id=user_id, projection={
-            "_id": 1,
-            "firstname": 1,
-            "lastname": 1,
-            "email": 1
-        })
+        configuration_id = model_data.get("configuration")
+        if not configuration_id:
+            raise ValueError("La configuration du modèle est requise")
+
+        user = self.user_service.get_document(
+            id=user_id,
+            projection={
+                "_id": 1,
+                "firstname": 1,
+                "lastname": 1,
+                "email": 1,
+            },
+        )
 
         default_version = "1.0"
         doc = {
@@ -51,46 +55,67 @@ class ModelsService(BaseService):
             "description": model_data.get("description", ""),
             "reference": model_reference,
             "version": default_version,
-            "configuration": ObjectId(model_data.get("configuration", None)),
+            "configuration": ObjectId(str(configuration_id)),
             "mapper": model_data.get("mapper", {}),
             "created_by": user,
             "created_at": utils.get_current_time(),
-            "updated_at": utils.get_current_time()
+            "updated_at": utils.get_current_time(),
         }
 
-        self.dao.insert_one(doc)
+        created = self.dao.insert_one(doc)
 
-        return self.dao.serialize(doc)
+        return created
 
-    def build_model(self, model_id: str, size: str, *, user_id: str = None) -> dict:
-        model = self.get_document(id=model_id, projection={
-            "_id": 1,
-            "name": 1,
-            "version": 1,
-            "reference": 1,
-            "description": 1,
-            "configuration": 1,
-        })
-        user = self.user_service.get_document(id=user_id, projection={
-            "_id": 1,
-            "firstname": 1,
-            "lastname": 1,
-            "email": 1
-        })
+    def build_model(self, model_id: str, parameters: dict | None, *, user_id: str | None = None) -> dict:
+        model = self.get_document(
+            id=model_id,
+            projection={
+                "_id": 1,
+                "name": 1,
+                "version": 1,
+                "reference": 1,
+                "description": 1,
+                "configuration": 1,
+            },
+        )
 
-        mcid = model.get("configuration", None)
-        if not mcid:
+        if not user_id:
+            raise ValueError("User identifier is required to build a model")
+
+        user = self.user_service.get_document(
+            id=user_id,
+            projection={
+                "_id": 1,
+                "firstname": 1,
+                "lastname": 1,
+                "email": 1,
+            },
+        )
+
+        configuration_id = model.get("configuration")
+        if not configuration_id:
             raise ValueError("Model configuration is missing")
 
-        docdt = {
-            "model": model,
-            "size": size,
+        parameters = parameters or {}
+        model_id = ObjectId(str(model["_id"]))
+
+        dataset_payload = {
+            "model": model_id,
+            "model_snapshot": model,
+            "configuration": ObjectId(str(configuration_id)),
             "status": "ready_to_generate",
             "created_by": user,
             "created_at": utils.get_current_time(),
+            "parameters": parameters,
         }
 
-        self.datasets_service.dao.insert_one(docdt)
+        size = parameters.get("size")
+        if size is not None:
+            try:
+                dataset_payload["size"] = int(size)
+            except (TypeError, ValueError):
+                dataset_payload["size"] = size
 
-        return self.datasets_service.dao.serialize(docdt)
+        created = self.datasets_service.create_dataset(dataset_payload)
+        return created
 

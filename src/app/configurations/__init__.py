@@ -1,1 +1,2 @@
 from .controller import create_configurations_router
+

@@ -1,4 +1,7 @@
-import mimetypes, os, re, base64
+import base64
+import mimetypes
+import os
+import re
 
 MIME_MAP_EXT = {
     "application/pdf": ".pdf",
