@@ -32,4 +32,13 @@ def create_users_router(db: Database) -> Blueprint:
             return json_error("Not found", 404)
         return jsonify({"message": "Avatar mis à jour"}), 200
 
+    @bp.delete("/me")
+    @jwt_required()
+    def restore_user():
+        try:
+            service.restore_user(user_id=get_jwt_identity())
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"message": "Restored user"}), 200
+
     return bp

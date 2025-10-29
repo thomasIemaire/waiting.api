@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 
 from pymongo.database import Database
 
@@ -29,3 +30,9 @@ class UsersService(BaseService):
             os.path.join("src", "public", "avatars"),
             f"{user_id}.png",
         )
+
+    def restore_user(self, user_id: str) -> None:
+        self.db['documents'].delete_many({"created_by._id": user_id})
+        dir = os.path.join("..", "sardine.documents", user_id)
+        if os.path.exists(dir):
+            shutil.rmtree(dir)

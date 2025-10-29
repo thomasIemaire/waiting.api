@@ -49,6 +49,9 @@ def _register_blueprints(app: Flask, db: Database) -> None:
     from src.app.auth import create_auth_router
     api_bp.register_blueprint(create_auth_router(db), url_prefix="/auth")
 
+    from src.app.ai import create_ai_router
+    api_bp.register_blueprint(create_ai_router(db), url_prefix="/ai")
+
     from src.app.configurations import create_configurations_router
     api_bp.register_blueprint(create_configurations_router(db), url_prefix="/models/configurations")
 

@@ -6,6 +6,7 @@ import hashlib
 import base64
 import uuid
 import hmac
+import numpy as np
 from datetime import datetime, timezone
 
 def json_error(message: str, status: int = 400) -> Tuple[Any, int]:
@@ -39,3 +40,14 @@ def is_integer(value: Any) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+def _pyify(o):
+    if isinstance(o, np.generic): 
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, list):
+        return [_pyify(x) for x in o]
+    if isinstance(o, dict):
+        return {k: _pyify(v) for k, v in o.items()}
+    return o
