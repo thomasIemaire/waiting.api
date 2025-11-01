@@ -21,7 +21,10 @@ def create_datasets_router(db: Database) -> Blueprint:
     @jwt_required()
     def find_dataset_examples(id: str):
         size = request.args.get("size", type=int)
-        docs = service.find_examples(id, size)
+        try:
+            docs = service.find_examples(id, size)
+        except ValueError:
+            return json_error("Not found", 404)
         if not docs:
             return json_error("Not found", 404)
         return jsonify(docs), 200
@@ -30,9 +33,10 @@ def create_datasets_router(db: Database) -> Blueprint:
     @jwt_required()
     def train_dataset(id: str):
         parameters = request.get_json(silent=True) or {}
-        result = service.train_dataset(id, get_jwt_identity(), parameters)
-        if not result:
-            return json_error("Not found", 404)
+        try:
+            result = service.train_dataset(id, get_jwt_identity(), parameters)
+        except ValueError as err:
+            return json_error(str(err), 404)
         return jsonify(result), 200
 
     return bp

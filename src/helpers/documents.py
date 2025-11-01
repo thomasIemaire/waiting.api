@@ -1,4 +1,7 @@
-import mimetypes, os, re, base64
+import base64
+import mimetypes
+import os
+import re
 
 MIME_MAP_EXT = {
     "application/pdf": ".pdf",
@@ -34,3 +37,10 @@ def _decode_base64_any(data_str: str) -> tuple[bytes, str | None]:
     if m:
         return base64.b64decode(m.group("data")), m.group("mime").strip()
     return base64.b64decode(data_str), None
+
+def file_to_base64(filepath: str) -> str:
+    """Lit un fichier et le convertit en data URL base64"""
+    with open(filepath, "rb") as f:
+        data = f.read()
+    b64_data = base64.b64encode(data).decode("utf-8")
+    return b64_data

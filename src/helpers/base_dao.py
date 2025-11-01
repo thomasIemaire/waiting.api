@@ -17,7 +17,7 @@ class BaseDao:
     db: Database
     _hide_mongo_id: bool = False
 
-    collection_name: ClassVar[str] = ""  # must be defined in subclasses
+    collection_name: ClassVar[str] = ""
 
     # -- Collection ---------------------------------------------------------
     @property
@@ -104,6 +104,9 @@ class BaseDao:
 
     def delete_one(self, query: Dict[str, Any]) -> int:
         return self.col.delete_one(query).deleted_count
+    
+    def delete_many(self, query: Dict[str, Any]) -> int:
+        return self.col.delete_many(query).deleted_count
 
     # -- Utils --------------------------------------------------------------
     def serialize(self, response: Any) -> Any:

@@ -12,7 +12,7 @@ def create_data_router(db: Database) -> Blueprint:
     @bp.get("/")
     @jwt_required()
     def find_data():
-        docs = service.dao.find()
+        docs = service.find_all()
         if not docs:
             return json_error("Not found", 404)
         return jsonify(docs), 200
@@ -29,8 +29,9 @@ def create_data_router(db: Database) -> Blueprint:
     @bp.get("/<id>")
     @jwt_required()
     def get_data(id):
-        doc = service.get_document(id=id)
-        if not doc:
+        try:
+            doc = service.get_data(data_id=id)
+        except ValueError:
             return json_error("Not found", 404)
         return jsonify(doc), 200
 

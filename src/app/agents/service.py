@@ -1,6 +1,8 @@
+from pymongo.database import Database
+
 from src.app.agents.dao import AgentsDao
 from src.helpers.base_service import BaseService
-from pymongo.database import Database
+
 
 class AgentsService(BaseService):
 
@@ -9,5 +11,4 @@ class AgentsService(BaseService):
         self.dao = AgentsDao(self.db)
 
     def find_all(self):
-        agents = self.dao.find(projection={"path": 0})
-        return self.dao.serialize(agents)
+        return self.dao.find(projection={"path": 0})

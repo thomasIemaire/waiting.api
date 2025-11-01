@@ -13,7 +13,7 @@ def create_app(config_object: Type[DefaultConfig] = DefaultConfig) -> Flask:
 
     cors.init_app(
         app,
-        resources={r"/api/*": {"origins": ["http://localhost:4200", "http://127.0.0.1:4200"]}},
+        resources={r"/api/*": {"origins": ["https://sardine-app.sendoc.fr", "http://localhost:4200", "http://127.0.0.1:4200"]}},
         allow_headers=["Content-Type", "Authorization"],
         expose_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -48,6 +48,9 @@ def _register_blueprints(app: Flask, db: Database) -> None:
 
     from src.app.auth import create_auth_router
     api_bp.register_blueprint(create_auth_router(db), url_prefix="/auth")
+
+    from src.app.ai import create_ai_router
+    api_bp.register_blueprint(create_ai_router(db), url_prefix="/ai")
 
     from src.app.configurations import create_configurations_router
     api_bp.register_blueprint(create_configurations_router(db), url_prefix="/models/configurations")
