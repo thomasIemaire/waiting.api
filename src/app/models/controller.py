@@ -25,15 +25,52 @@ def create_models_router(db: Database) -> Blueprint:
             return json_error("Bad request")
         model = service.create(get_jwt_identity(), payload)
         return jsonify(model), 201
-    
-    @bp.post("/build/<model_id>")
+
+    @bp.post("/ai")
     @jwt_required()
-    def build_model(model_id):
+    def create_model_via_ai():
+        payload = request.get_json(silent=True)
+        if not payload:
+            return json_error("Bad request")
+        user_prompt = payload.get("prompt", "")
+        model = service.create_model_via_ai(user_prompt)
+        return jsonify(model), 201
+    
+    @bp.get("/status/<status>")
+    @jwt_required()
+    def find_models_by_status(status: str):
         try:
-            parameters = request.get_json(silent=True) or {}
-            model = service.build_model(model_id, parameters, user_id=get_jwt_identity())
-            return jsonify(model), 200
-        except ValueError as e:
-            return json_error(str(e))
+            docs = service.find_by_status(status)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify(docs), 200
+
+    @bp.get("/<id>")
+    @jwt_required()
+    def find_model_by_id(id: str):
+        try:
+            doc = service.get_document(id=id)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify(doc), 200
+    
+    @bp.delete("/<id>")
+    @jwt_required()
+    def delete_model(id: str):
+        try:
+            service.delete(id=id)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"message": "Model deleted"}), 200
+    
+    @bp.post("/build/<id>")
+    @jwt_required()
+    def build_model(id: str):
+        parameters = request.get_json(silent=True) or {}
+        try:
+            result = service.build_model(id, parameters, user_id=get_jwt_identity())
+        except ValueError as err:
+            return json_error(str(err), 404)
+        return jsonify(result), 200
 
     return bp

@@ -1,3 +1,4 @@
+from flask import json
 from src.app.data.service import DataService
 from src.app.datasets.service import DatasetsService
 from src.app.users.service import UsersService
@@ -7,6 +8,10 @@ from bson.objectid import ObjectId
 from src.app.configurations.service import ConfigurationsService
 from src.helpers.base_service import BaseService
 from src.helpers import utils
+
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
 
 class ModelsService(BaseService):
     
@@ -39,15 +44,7 @@ class ModelsService(BaseService):
         if not configuration_id:
             raise ValueError("La configuration du modèle est requise")
 
-        user = self.user_service.get_document(
-            id=user_id,
-            projection={
-                "_id": 1,
-                "firstname": 1,
-                "lastname": 1,
-                "email": 1,
-            },
-        )
+        user = self.user_service.find_user_by_id_basic(user_id)
 
         default_version = "1.0"
         doc = {
@@ -57,6 +54,7 @@ class ModelsService(BaseService):
             "version": default_version,
             "configuration": ObjectId(str(configuration_id)),
             "mapper": model_data.get("mapper", {}),
+            "status": "ready",
             "created_by": user,
             "created_at": utils.get_current_time(),
             "updated_at": utils.get_current_time(),
@@ -65,6 +63,49 @@ class ModelsService(BaseService):
         created = self.dao.insert_one(doc)
 
         return created
+
+    def create_model_via_ai(self, user_prompt: str) -> dict:
+        load_dotenv()
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OpenAI API key is not configured")
+        
+        client = OpenAI(api_key=openai_api_key)
+
+        system_prompt = ""
+        with open(os.path.join("src", "static", "openai", "model_prompt.txt"), "r", encoding="utf-8") as f:
+            system_prompt = f.read()
+
+        completion = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+
+        model_content = completion.choices[0].message.content
+        return json.loads(model_content)
+
+    def delete(self, *, id: str) -> None:
+        if not self.document_exists(id=id):
+            raise ValueError("Document not found")
+        
+        self.dao.delete_one({"_id": ObjectId(id)})
+
+    def find_by_status(self, status: str):
+        models = self.dao.find(query={"status": status}, projection={"mapper": 0, "configuration": 0})
+        return self.dao.serialize(models)
+
+    def update_status(self, model_id: str, status: str, *, user_id: str | None = None) -> dict:
+        return self.dao.update_one(
+            {"_id": ObjectId(model_id)},
+            {
+                "status": status,
+                "build_at": utils.get_current_time(),
+                "build_by": self.user_service.find_user_by_id_basic(user_id)
+            },
+        )
 
     def build_model(self, model_id: str, parameters: dict | None, *, user_id: str | None = None) -> dict:
         model = self.get_document(
@@ -82,40 +123,22 @@ class ModelsService(BaseService):
         if not user_id:
             raise ValueError("User identifier is required to build a model")
 
-        user = self.user_service.get_document(
-            id=user_id,
-            projection={
-                "_id": 1,
-                "firstname": 1,
-                "lastname": 1,
-                "email": 1,
-            },
-        )
+        user = self.user_service.find_user_by_id_basic(user_id)
 
         configuration_id = model.get("configuration")
-        if not configuration_id:
-            raise ValueError("Model configuration is missing")
+        # if not configuration_id:
+        #     raise ValueError("Model configuration is missing")
 
+        model["model_id"] = model.pop("_id")
         parameters = parameters or {}
-        model_id = ObjectId(str(model["_id"]))
 
         dataset_payload = {
-            "model": model_id,
-            "model_snapshot": model,
-            "configuration": ObjectId(str(configuration_id)),
-            "status": "ready_to_generate",
+            **model,
+            "status": "to-build",
             "created_by": user,
             "created_at": utils.get_current_time(),
             "parameters": parameters,
         }
 
-        size = parameters.get("size")
-        if size is not None:
-            try:
-                dataset_payload["size"] = int(size)
-            except (TypeError, ValueError):
-                dataset_payload["size"] = size
-
-        created = self.datasets_service.create_dataset(dataset_payload)
-        return created
+        return self.datasets_service.create(dataset_payload)
 

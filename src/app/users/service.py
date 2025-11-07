@@ -18,6 +18,9 @@ class UsersService(BaseService):
     def find_user_by_id(self, user_id: str):
         return self.get_document(id=user_id, projection={"password": 0})
 
+    def find_user_by_id_basic(self, user_id: str):
+        return self.get_document(id=user_id, projection={"_id": 1, "firstname": 1, "lastname": 1, "email": 1})
+
     def find_users(self):
         return self.dao.find(projection={"password": 0})
 

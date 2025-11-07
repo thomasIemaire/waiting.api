@@ -15,7 +15,6 @@ class DatasetsService(BaseService):
         self.dao = DatasetsDao(db)
         self.user_service = UsersService(db)
 
-    # -- Queries ---------------------------------------------------------
     def find_all(self):
         return self.dao.find(
             {"status": {"$ne": "completed"}},
@@ -70,9 +69,21 @@ class DatasetsService(BaseService):
             {"status": status}
         )
 
-    # -- Commands --------------------------------------------------------
-    def create_dataset(self, payload: dict) -> dict:
-        return self.dao.insert_one(payload)
+    def find_by_status(self, status: str):
+        datasets = self.dao.find(
+            query={"status": status},
+            projection={"parameters": 0, "last_log": 0, "model_snapshot": 0},
+        )
+        return self.dao.serialize(datasets)
+
+    def create(self, payload: dict) -> dict:
+        return self.dao.serialize(self.dao.insert_one(payload))
+
+    def delete(self, *, id: str) -> None:
+        if not self.document_exists(id=id):
+            raise ValueError("Document not found")
+        
+        self.dao.delete_one({"_id": ObjectId(id)})
 
     def train_dataset(self, dataset_id: str, user_id: str, parameters: dict):
         self.get_document(id=dataset_id)
