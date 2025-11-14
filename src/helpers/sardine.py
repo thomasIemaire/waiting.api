@@ -14,6 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 # === AJOUTS POUR BASE64 ===
 import base64, io
 
+from dotenv import load_dotenv
+load_dotenv()
+
+DEFAULT_TESSERACT_CMD = os.getenv("TESSERACT_CMD")
+
 # ===================== PDF -> IMAGES =====================
 def pdf_to_images(pdf_path: Path, out_dir: Path, dpi: int = 350) -> List[Path]:
     try:
@@ -260,10 +265,13 @@ def _deskew_and_orient(pil_img: Image.Image) -> Image.Image:
     return pil_img
 
 def _ocr_pil_image(pil_img: Image.Image, *, lang: str = "fra+eng",
-                   tesseract_cmd: Optional[str] = r"C:\Users\Utilisateur\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+                   tesseract_cmd: Optional[str] = DEFAULT_TESSERACT_CMD,
                    type_box: Optional[int] = None,
                    model_tbl: YOLO = None) -> str:
     """OCR robustifié sur une image PIL (orientation + prétraitement)."""
+    if tesseract_cmd is None:
+        tesseract_cmd = DEFAULT_TESSERACT_CMD
+    
     cls_id = _to_class_id(type_box)
 
     try:
@@ -369,8 +377,12 @@ def _ocr_many_pil(crops: list[Image.Image],
 
 # ===================== OCR WRAPPER =====================
 def read_image(img_path: Path, *, lang: str = "fra+eng",
-               tesseract_cmd: Optional[str] = r"C:\Users\Utilisateur\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+               tesseract_cmd: Optional[str] = DEFAULT_TESSERACT_CMD
                ) -> str:
+    if tesseract_cmd is None:
+        tesseract_cmd = DEFAULT_TESSERACT_CMD
+
+    from PIL import Image
     with Image.open(img_path) as im:
         return _ocr_pil_image(im, lang=lang, tesseract_cmd=tesseract_cmd)
 

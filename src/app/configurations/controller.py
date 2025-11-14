@@ -26,6 +26,15 @@ def create_configurations_router(db: Database) -> Blueprint:
         configuration = service.create(payload, user_id=get_jwt_identity())
         return jsonify(configuration), 201
     
+    @bp.delete("/<id>")
+    @jwt_required()
+    def delete_configuration(id):
+        try:
+            service.delete_configuration(config_id=id)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"status": "deleted"}), 200
+    
     @bp.get("/<id>")
     @jwt_required()
     def get_configuration(id):

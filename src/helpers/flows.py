@@ -139,11 +139,11 @@ def node_sardine(config, *, base64=None, debug=False):
         print_debug("[SARDINE] No base64 provided", debug)
         return False, "unknown", []
 
-    dir_to_del = "../../workspace.sardine"
+    dir_to_del = "../sardine.agents"
     cls, pages = run_sardine(
-        model_detect_path=f"{dir_to_del}/sardine.train/runs/detect/sardine-layout-l14/weights/best.pt",
-        model_class_path=f"{dir_to_del}/sardine.train/runs/classify/sardine-type-l3/weights/best.pt",
-        model_table_path=f"{dir_to_del}/sardine.train/runs/table/sardine-table-l4/weights/last.pt",
+        model_detect_path=f"{dir_to_del}/sard-det/best.pt",
+        model_class_path=f"{dir_to_del}/sard-cls/best.pt",
+        model_table_path=f"{dir_to_del}/sard-tbl/last.pt",
         img_b64=base64,
         device="cpu",
         conf=.7,

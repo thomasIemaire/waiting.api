@@ -37,3 +37,9 @@ class DataService(BaseService):
             doc["created_by"] = ObjectId(user_id)
 
         return self.dao.insert_one(doc)
+    
+    def delete_data(self, *, data_id: str) -> None:
+        if not self.document_exists(id=data_id):
+            raise ValueError("Document not found")
+        
+        self.dao.delete_one({"_id": ObjectId(data_id)})

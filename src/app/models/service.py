@@ -40,21 +40,22 @@ class ModelsService(BaseService):
         if self.document_exists(query={"reference": model_reference}):
             raise ValueError("La référence du modèle existe déjà")
 
-        configuration_id = model_data.get("configuration")
-        if not configuration_id:
-            raise ValueError("La configuration du modèle est requise")
+        # configuration_id = model_data.get("configuration")
+        # if not configuration_id:
+        #     raise ValueError("La configuration du modèle est requise")
 
         user = self.user_service.find_user_by_id_basic(user_id)
 
+        default_status = "ready"
         default_version = "1.0"
         doc = {
             "name": model_name,
             "description": model_data.get("description", ""),
             "reference": model_reference,
             "version": default_version,
-            "configuration": ObjectId(str(configuration_id)),
+            # "configuration": ObjectId(str(configuration_id)),
             "mapper": model_data.get("mapper", {}),
-            "status": "ready",
+            "status": default_status,
             "created_by": user,
             "created_at": utils.get_current_time(),
             "updated_at": utils.get_current_time(),
@@ -64,17 +65,81 @@ class ModelsService(BaseService):
 
         return created
 
-    def create_model_via_ai(self, user_prompt: str) -> dict:
+    def update(self, *, id: str, update_data: dict, user_id: str) -> dict:
+        model = self.get_document(id=id)
+
+        update_fields = {}
+        if "name" in update_data:
+            update_fields["name"] = update_data["name"].strip()
+        if "description" in update_data:
+            update_fields["description"] = update_data["description"].strip()
+        if "mapper" in update_data:
+            update_fields["mapper"] = update_data["mapper"]
+        if "reference" in update_data:
+            new_reference = update_data["reference"].strip()
+            if self.document_exists(query={"reference": new_reference, "_id": {"$ne": ObjectId(id)}}):
+                raise ValueError("La référence du modèle existe déjà")
+            update_fields["reference"] = new_reference
+        
+        if model.get("reference") != update_fields.get("reference", model.get("reference")) or \
+            model.get("mapper") != update_fields.get("mapper", model.get("mapper")):
+            update_fields["version"] = utils.increment_version(model.get("version", "1.0"), "major")
+
+        update_fields["updated_at"] = utils.get_current_time()
+
+        updated = self.dao.update_one(
+            {"_id": ObjectId(id)},
+            update_fields,
+        )
+
+        return updated
+
+    def create_model_via_ai(self, payload: dict) -> dict:
+        generate_model = payload.get("generate_model", False)
+        generate_configuration = payload.get("generate_configuration", False)
+        if not generate_model and not generate_configuration:
+            raise ValueError("At least one of 'generate_model' or 'generate_configuration' must be true")
+        
+        user_prompt = payload.get("prompt", "")
+        if not user_prompt:
+            raise ValueError("Prompt is required to generate model via AI")
+
+        system_prompt = ""
+
+        model = payload.get("model", {})
+        if generate_model:
+            with open(os.path.join("src", "static", "openai", "model_prompt.txt"), "r", encoding="utf-8") as f:
+                system_prompt = f.read()
+
+            model_content = self.call_openai_api(system_prompt, user_prompt)
+            model = json.loads(model_content)
+
+            model_mapper = model.get("mapper", {})
+            model["mapper"] = self.set_leaf_mapper(model.get("reference", ""), model_mapper)
+
+        configuration = payload.get("configuration", {})
+        if generate_configuration and model:
+            with open(os.path.join("src", "static", "openai", "configuration_prompt.txt"), "r", encoding="utf-8") as f:
+                system_prompt = f.read()
+
+            existing_configuration = self.configurations_service.dao.find(query={}, projection={"_id": 1, "name": 1, "description": 1})
+
+            user_prompt += f"\nGénérer la configuration pour le modèle suivant:\n{json.dumps(model, indent=2)}"
+            user_prompt += f"\nNe pas oublier de bien respecter les références du mapper:\n{json.dumps(model.get('mapper', {}), indent=2)}"
+            user_prompt += f"\nVoici les configurations existantes dans le système:\n{json.dumps(self.configurations_service.dao.serialize(existing_configuration), indent=2)}\Tu peux réutiliser des configurations existantes si nécessaire avec leur `_id`."
+
+            configuration_content = self.call_openai_api(system_prompt, user_prompt)
+            configuration = json.loads(configuration_content)
+
+        return { "model": model, "configuration": configuration}
+    
+    def call_openai_api(self, system_prompt: str, user_prompt: str) -> str:
         load_dotenv()
         openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
             raise ValueError("OpenAI API key is not configured")
         
         client = OpenAI(api_key=openai_api_key)
-
-        system_prompt = ""
-        with open(os.path.join("src", "static", "openai", "model_prompt.txt"), "r", encoding="utf-8") as f:
-            system_prompt = f.read()
 
         completion = client.chat.completions.create(
             model="gpt-5",
@@ -84,8 +149,17 @@ class ModelsService(BaseService):
             ]
         )
 
-        model_content = completion.choices[0].message.content
-        return json.loads(model_content)
+        return completion.choices[0].message.content
+
+    def set_leaf_mapper(self, reference: str, mapper: dict) -> dict:
+        for key, value in mapper.items():
+            if isinstance(value, dict):
+                reference += f"_{key}"
+                mapper[key] = self.set_leaf_mapper(reference.upper(), value)
+            else:
+                mapper[key] = f"{reference}_{key}".upper()
+
+        return mapper
 
     def delete(self, *, id: str) -> None:
         if not self.document_exists(id=id):

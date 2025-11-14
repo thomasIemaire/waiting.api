@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 def json_error(message: str, status: int = 400) -> Tuple[Any, int]:
     return jsonify({"error": message}), status
 
-def bump_version(version: str, bump: str) -> str:
+def increment_version(version: str, bump: str) -> str:
     major, minor = map(int, version.split("."))
     if bump == "major":
         return f"{major + 1}.0"

@@ -34,5 +34,14 @@ def create_data_router(db: Database) -> Blueprint:
         except ValueError:
             return json_error("Not found", 404)
         return jsonify(doc), 200
+    
+    @bp.delete("/<id>")
+    @jwt_required()
+    def delete_data(id):
+        try:
+            service.delete_data(data_id=id)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"status": "deleted"}), 200
 
     return bp

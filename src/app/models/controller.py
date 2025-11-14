@@ -32,8 +32,7 @@ def create_models_router(db: Database) -> Blueprint:
         payload = request.get_json(silent=True)
         if not payload:
             return json_error("Bad request")
-        user_prompt = payload.get("prompt", "")
-        model = service.create_model_via_ai(user_prompt)
+        model = service.create_model_via_ai(payload)
         return jsonify(model), 201
     
     @bp.get("/status/<status>")
@@ -53,6 +52,18 @@ def create_models_router(db: Database) -> Blueprint:
         except ValueError:
             return json_error("Not found", 404)
         return jsonify(doc), 200
+
+    @bp.put("/<id>")
+    @jwt_required()
+    def update_model(id: str):
+        payload = request.get_json(silent=True)
+        if not payload:
+            return json_error("Bad request")
+        try:
+            updated = service.update(id=id, update_data=payload, user_id=get_jwt_identity())
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify(updated), 200
     
     @bp.delete("/<id>")
     @jwt_required()

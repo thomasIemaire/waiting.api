@@ -19,7 +19,7 @@ class ConfigurationsService(BaseService):
 
     # -- Queries ---------------------------------------------------------
     def find_all(self) -> list[Dict[str, Any]]:
-        return self.dao.find_all()
+        return self.dao.serialize(self.dao.find_all())
 
     def get_configuration(self, *, config_id: str) -> Dict[str, Any]:
         return self.get_document(id=config_id)
@@ -45,6 +45,12 @@ class ConfigurationsService(BaseService):
             doc["created_by"] = ObjectId(user_id)
 
         return self.dao.insert_one(doc)
+    
+    def delete_configuration(self, *, config_id: str) -> None:
+        if not self.document_exists(id=config_id):
+            raise ValueError("Configuration not found")
+        
+        self.dao.delete_one({"_id": ObjectId(config_id)})
 
     # -- Helpers ---------------------------------------------------------
     def calculate_max_configuration_possibilities(self, configuration: dict) -> int:

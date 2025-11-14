@@ -91,8 +91,8 @@ def run(text: str, *, reference: str, version: str):
         print(f"[WARN] Agent introuvable : {reference} v{version}")
 
     # 2) Construire le chemin modèle
-    path = f"sardine.trainer/sardine.agents/{reference}/{version}"
-    model_dir = os.path.normpath(os.path.join("../../workspace.sardine", path))
+    path = f"sardine.agents/{reference}/{version}"
+    model_dir = os.path.normpath(os.path.join("..", path))
 
     # 3) Charger le pipeline (caché)
     nlp = get_token_classifier(model_dir)
