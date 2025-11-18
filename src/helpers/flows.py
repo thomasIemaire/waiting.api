@@ -147,12 +147,21 @@ def node_sardine(config, *, base64=None, debug=False):
         img_b64=base64,
         device="cpu",
         conf=.7,
-        pdf_dpi=1024
+        pdf_dpi=768
     )
 
     print_debug(f"[SARDINE] Classified as: {cls}", debug)
 
     return cls in accepted_files, cls, pages
+
+def clean_tokens(mapper_str: str, model: str) -> str:
+    model_upper = model.upper()
+    
+    pattern = rf'(?<="){re.escape(model_upper)}(?:_[A-Za-z]+)*(?=")'
+    
+    cleaned = re.sub(pattern, '', mapper_str)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+    return cleaned
 
 def node_agent(config, text, *, debug=False):
     model = config.get("model", "")
@@ -199,36 +208,38 @@ def node_agent(config, text, *, debug=False):
 
         for k, v in best_result.items():
             mapper_str = mapper_str.replace(f'"{k}"', json.dumps(v))
+
+        mapper_str = clean_tokens(mapper_str, model)
+
         mapper = json.loads(mapper_str)
 
         return max_score, best_result, mapper
 
-    if isinstance(text, list):
-        best_result, max_score, mapper = {}, 0, {}
+    if not isinstance(text, list):
+        text = [text]
 
-        max_workers = 1
-        if len(text) <= max_workers:
-            text_chunks = [[t] for t in text]
-        else:
-            chunk_size = (len(text) + max_workers - 1) // max_workers
-            text_chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+    best_result, max_score, mapper = {}, 0, {}
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_chunk, chunk): chunk for chunk in text_chunks}
-
-            for future in as_completed(futures):
-                try:
-                    temp, res, map = future.result()
-                    if temp > max_score:
-                        max_score, best_result, mapper = temp, res, map
-                except Exception as e:
-                    print_debug(f"[AGENT] Error on chunk {futures[future]}: {e}", debug)
-
-        result = mapper
-
+    max_workers = 1
+    if len(text) <= max_workers:
+        text_chunks = [[t] for t in text]
     else:
-        _, best, result = run_agent(text, reference=model, version=version)
+        chunk_size = (len(text) + max_workers - 1) // max_workers
+        text_chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_chunk, chunk): chunk for chunk in text_chunks}
+
+        for future in as_completed(futures):
+            try:
+                temp, res, map = future.result()
+                if temp > max_score:
+                    max_score, best_result, mapper = temp, res, map
+            except Exception as e:
+                print_debug(f"[AGENT] Error on chunk {futures[future]}: {e}", debug)
+
+    result = mapper
+        
     print_debug(f"[AGENT] Final Result: {result}", debug)
     return result
 
@@ -273,6 +284,8 @@ def node_agent_group(config, text, *, debug=False):
         for k, v in merged_result.items():
             safe_v = json.dumps(v, ensure_ascii=False)[1:-1]
             mapper_str = mapper_str.replace(k, safe_v)
+
+        mapper_str = clean_tokens(mapper_str, model)
         
         mapper_combined = json.loads(mapper_str)
 
