@@ -157,13 +157,22 @@ def node_sardine(config, *, base64=None, debug=False):
 def node_agent(config, text, *, debug=False):
     model = config.get("model", "")
     version = config.get("version", "")
+    type = config.get("type", "single")
 
     def process_chunk(chunk):
         """Traite un sous-ensemble de textes (chunk) séquentiellement."""
         best_result, max_score, mapper = {}, 0, {}
         for t in chunk:
 
-            t, table = (" ".join(t.get("header", [])), t) if isinstance(t, dict) and t.get("type") == "table" else (t, None)
+            # 👉 Si on est en mode "list", on ne garde que les tables
+            if type == "list" and not (isinstance(t, dict) and t.get("type") == "table"):
+                continue
+
+            # Logique existante pour distinguer texte simple vs table
+            t, table = (
+                " ".join(t.get("header", [])), t
+            ) if isinstance(t, dict) and t.get("type") == "table" else (t, None)
+
             print_debug(f"[AGENT] Processed text chunk: {t}", debug and table is not None)
 
             current, mapper = run_agent(t, reference=model, version=version)
@@ -177,7 +186,8 @@ def node_agent(config, text, *, debug=False):
                 columns = table.get("columns", [])
 
                 for k, v in best_result.items():
-                    if not isinstance(v, str): continue
+                    if not isinstance(v, str):
+                        continue
                     for i, col in enumerate(headers):
                         if isinstance(col, str) and (v in col or v == col or v.replace(" ", "") == col.replace(" ", "")):
                             best_result[k] = columns[i]
@@ -707,6 +717,7 @@ flow = {
         "config": {
             "model": "lines",
             "version": "1.0",
+            "type": "list"
         },
         "outputs": { "base": ["011calcHT"] },
         "inputs": ["002"]
