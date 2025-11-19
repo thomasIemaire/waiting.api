@@ -147,7 +147,7 @@ def node_sardine(config, *, base64=None, debug=False):
         img_b64=base64,
         device="cpu",
         conf=.5,
-        pdf_dpi=768
+        pdf_dpi=512
     )
 
     print_debug(f"[SARDINE] Classified as: {cls}", debug)
