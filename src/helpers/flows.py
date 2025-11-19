@@ -146,7 +146,7 @@ def node_sardine(config, *, base64=None, debug=False):
         model_table_path=f"{dir_to_del}/sard-tbl/last.pt",
         img_b64=base64,
         device="cpu",
-        conf=.7,
+        conf=.5,
         pdf_dpi=768
     )
 
