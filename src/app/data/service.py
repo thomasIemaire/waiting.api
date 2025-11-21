@@ -38,6 +38,19 @@ class DataService(BaseService):
 
         return self.dao.insert_one(doc)
     
+    def update(self, *, data_id: str, data: dict) -> dict:
+        if not self.document_exists(id=data_id):
+            raise ValueError("Document not found")
+
+        update_fields = {
+            "name": data.get("name"),
+            "data": data.get("data"), # Le tableau JSON
+            "updated_at": utils.get_current_time(),
+        }
+
+        self.dao.update_one({"_id": ObjectId(data_id)}, update_fields)
+        return self.get_data(data_id=data_id)
+
     def delete_data(self, *, data_id: str) -> None:
         if not self.document_exists(id=data_id):
             raise ValueError("Document not found")

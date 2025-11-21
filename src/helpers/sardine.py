@@ -1,13 +1,13 @@
 from pathlib import Path
 import shutil
 import sys, os, re
+import threading  # Import ajouté pour le verrouillage
 from typing import List, Tuple, Optional
 
 from ultralytics import YOLO
 import cv2, numpy as np, pandas as pd, pytesseract
 from pytesseract import Output
 
-import pytesseract
 from PIL import Image, ImageFilter, ImageOps
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,6 +18,31 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_TESSERACT_CMD = os.getenv("TESSERACT_CMD")
+
+# ===================== CACHE MODEL YOLO =====================
+# Dictionnaire global pour stocker les instances de modèles chargées
+_YOLO_CACHE: dict[str, YOLO] = {}
+# Verrou pour éviter que deux threads ne chargent le même modèle simultanément
+_YOLO_LOCK = threading.Lock()
+
+def get_cached_yolo_model(path: str) -> YOLO:
+    """
+    Récupère une instance de modèle YOLO depuis le cache ou la charge si nécessaire.
+    Utilise le chemin absolu comme clé de cache pour éviter les doublons.
+    """
+    abs_path = os.path.abspath(path)
+    
+    # Vérification rapide sans verrou (lecture seule)
+    if abs_path in _YOLO_CACHE:
+        return _YOLO_CACHE[abs_path]
+
+    with _YOLO_LOCK:
+        # Double vérification à l'intérieur du verrou
+        if abs_path not in _YOLO_CACHE:
+            print(f"[INFO] Loading YOLO model into memory: {abs_path}")
+            _YOLO_CACHE[abs_path] = YOLO(path)
+        
+        return _YOLO_CACHE[abs_path]
 
 # ===================== PDF -> IMAGES =====================
 def pdf_to_images(pdf_path: Path, out_dir: Path, dpi: int = 350) -> List[Path]:
@@ -267,7 +292,8 @@ def _deskew_and_orient(pil_img: Image.Image) -> Image.Image:
 def _ocr_pil_image(pil_img: Image.Image, *, lang: str = "fra+eng",
                    tesseract_cmd: Optional[str] = DEFAULT_TESSERACT_CMD,
                    type_box: Optional[int] = None,
-                   model_tbl: YOLO = None) -> str:
+                   model_tbl: YOLO = None,
+                   conf_tbl: float = 0.45) -> str:
     """OCR robustifié sur une image PIL (orientation + prétraitement)."""
     if tesseract_cmd is None:
         tesseract_cmd = DEFAULT_TESSERACT_CMD
@@ -297,7 +323,7 @@ def _ocr_pil_image(pil_img: Image.Image, *, lang: str = "fra+eng",
                     return {"type": "table", "header": [], "columns": []}
 
                 # Détection colonnes (classe 1), gauche -> droite
-                col_boxes = _detect_columns_from_table_region(pil_img, model_tbl=model_tbl, conf=0.25, pad=6)
+                col_boxes = _detect_columns_from_table_region(pil_img, model_tbl=model_tbl, conf=conf_tbl, pad=6)
                 if not col_boxes:
                     # Fallback: une colonne unique
                     tmp = _preprocess_for_ocr(_deskew_and_orient(pil_img.convert("RGB")))
@@ -517,7 +543,8 @@ def inference(
     model_table_path: str,
     img_b64: str,                 # <-- base64 obligatoire maintenant
     device: str = "cpu",
-    conf: float = 0.25,
+    conf_det: float = 0.25,
+    conf_tbl: float = 0.45,
     pdf_dpi: int = 200
 ):
     """
@@ -530,10 +557,10 @@ def inference(
       - une data URL base64 (image/* ou application/pdf), ex: 'data:application/pdf;base64,....'
       - ou du base64 brut (image ou PDF)
     """
-    # Charger les modèles
-    model_det = YOLO(model_detect_path)
-    model_cls = YOLO(model_class_path)
-    model_tbl = YOLO(model_table_path)
+    # Charger les modèles via le CACHE
+    model_det = get_cached_yolo_model(model_detect_path)
+    model_cls = get_cached_yolo_model(model_class_path)
+    model_tbl = get_cached_yolo_model(model_table_path)
 
     # ---------- Décodage base64 uniquement ----------
     raw_bytes, mime = _try_decode_base64(img_b64)
@@ -559,7 +586,7 @@ def inference(
         source=sources_pil,
         save=False,
         save_txt=False,
-        conf=conf,
+        conf=conf_det,
         device=device,
         verbose=True,
     )
@@ -577,7 +604,7 @@ def inference(
         page_texts: list[str] = []
 
         if r.boxes is None or len(r.boxes) == 0:
-            page_texts.append(_ocr_pil_image(im, model_tbl=model_tbl))
+            page_texts.append(_ocr_pil_image(im, model_tbl=model_tbl, conf_tbl=conf_tbl))
         else:
             bcls = r.boxes.cls
             if hasattr(bcls, "cpu"):

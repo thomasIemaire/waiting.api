@@ -25,6 +25,19 @@ def create_configurations_router(db: Database) -> Blueprint:
             return json_error("Bad request")
         configuration = service.create(payload, user_id=get_jwt_identity())
         return jsonify(configuration), 201
+
+    @bp.put("/<id>")
+    @jwt_required()
+    def update_configuration(id):
+        payload = request.get_json(silent=True)
+        if not payload:
+            return json_error("Bad request")
+        try:
+            # On passe id et payload
+            updated = service.update(config_id=id, data=payload)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify(updated), 200
     
     @bp.delete("/<id>")
     @jwt_required()

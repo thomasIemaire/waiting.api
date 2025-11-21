@@ -27,7 +27,7 @@ class ModelsService(BaseService):
     def find_all(self):
         models = self.dao.find_all()
         return self.dao.serialize(models)
-
+    
     def create(self, user_id: str, model_data: dict) -> ObjectId:
         model_name = (model_data.get("name") or "").strip()
         if not model_name:
@@ -40,9 +40,8 @@ class ModelsService(BaseService):
         if self.document_exists(query={"reference": model_reference}):
             raise ValueError("La référence du modèle existe déjà")
 
-        # configuration_id = model_data.get("configuration")
-        # if not configuration_id:
-        #     raise ValueError("La configuration du modèle est requise")
+        configuration_id = model_data.get("configuration")
+        config_ref = ObjectId(str(configuration_id)) if configuration_id else None
 
         user = self.user_service.find_user_by_id_basic(user_id)
 
@@ -53,7 +52,7 @@ class ModelsService(BaseService):
             "description": model_data.get("description", ""),
             "reference": model_reference,
             "version": default_version,
-            # "configuration": ObjectId(str(configuration_id)),
+            "configuration": config_ref,
             "mapper": model_data.get("mapper", {}),
             "status": default_status,
             "created_by": user,
@@ -62,25 +61,29 @@ class ModelsService(BaseService):
         }
 
         created = self.dao.insert_one(doc)
-
         return created
 
     def update(self, *, id: str, update_data: dict, user_id: str) -> dict:
         model = self.get_document(id=id)
-
         update_fields = {}
+
         if "name" in update_data:
             update_fields["name"] = update_data["name"].strip()
         if "description" in update_data:
             update_fields["description"] = update_data["description"].strip()
         if "mapper" in update_data:
             update_fields["mapper"] = update_data["mapper"]
+        
+        if "configuration" in update_data:
+            config_id = update_data["configuration"]
+            update_fields["configuration"] = ObjectId(str(config_id)) if config_id else None
+
         if "reference" in update_data:
             new_reference = update_data["reference"].strip()
             if self.document_exists(query={"reference": new_reference, "_id": {"$ne": ObjectId(id)}}):
                 raise ValueError("La référence du modèle existe déjà")
             update_fields["reference"] = new_reference
-        
+
         if model.get("reference") != update_fields.get("reference", model.get("reference")) or \
             model.get("mapper") != update_fields.get("mapper", model.get("mapper")):
             update_fields["version"] = utils.increment_version(model.get("version", "1.0"), "major")
@@ -91,7 +94,6 @@ class ModelsService(BaseService):
             {"_id": ObjectId(id)},
             update_fields,
         )
-
         return updated
 
     def create_model_via_ai(self, payload: dict) -> dict:

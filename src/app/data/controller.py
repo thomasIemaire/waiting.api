@@ -26,6 +26,18 @@ def create_data_router(db: Database) -> Blueprint:
         created = service.create(payload, user_id=get_jwt_identity())
         return jsonify(created), 201
 
+    @bp.put("/<id>")
+    @jwt_required()
+    def update_data(id):
+        payload = request.get_json(silent=True)
+        if not payload:
+            return json_error("Bad request")
+        try:
+            updated = service.update(data_id=id, data=payload)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify(updated), 200
+
     @bp.get("/<id>")
     @jwt_required()
     def get_data(id):

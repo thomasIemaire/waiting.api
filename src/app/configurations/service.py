@@ -22,7 +22,38 @@ class ConfigurationsService(BaseService):
         return self.dao.serialize(self.dao.find_all())
 
     def get_configuration(self, *, config_id: str) -> Dict[str, Any]:
-        return self.get_document(id=config_id)
+        config = self.get_document(id=config_id)
+        
+        # On parcourt les attributs pour enrichir les références
+        for attr in config.get("attributes", []):
+            value = attr.get("value", {})
+            rule = value.get("rule")
+            params = value.get("parameters", {})
+            
+            # Si l'attribut pointe vers une Data ou une autre Config
+            if rule in ["data", "configuration"] and "object_id" in params:
+                ref_id = params["object_id"]
+                try:
+                    if rule == "data":
+                        # Recherche rapide du nom dans la collection data
+                        ref_doc = self.db["models_data"].find_one(
+                            {"_id": ObjectId(ref_id)}, 
+                            {"name": 1} # On ne récupère que le nom, pas tout le JSON
+                        )
+                    elif rule == "configuration":
+                        # Recherche du nom dans la collection configurations
+                        ref_doc = self.dao.find_one(
+                            {"_id": ObjectId(ref_id)}, 
+                            {"name": 1}
+                        )
+                    
+                    if ref_doc:
+                        # On injecte le nom pour le frontend
+                        params["object_name"] = ref_doc.get("name")
+                except Exception:
+                    pass # Si l'ID est invalide ou supprimé, on ignore
+
+        return config
 
     # -- Commands --------------------------------------------------------
     def create(
@@ -45,6 +76,26 @@ class ConfigurationsService(BaseService):
             doc["created_by"] = ObjectId(user_id)
 
         return self.dao.insert_one(doc)
+    
+    def update(self, *, config_id: str, data: dict) -> dict:
+        if not self.document_exists(id=config_id):
+             raise ValueError("Configuration not found")
+
+        update_fields = {
+            "name": data.get("name"),
+            "description": data.get("description", ""),
+            "attributes": data.get("attributes", []),
+            "formats": data.get("formats", []),
+            "randomizers": data.get("randomizers", []),
+            # Recalculer les possibilités lors de la mise à jour
+            "possibilities": self.calculate_max_configuration_possibilities(data),
+        }
+        
+        # On nettoie les champs None ou vides si nécessaire, ou on remplace tout.
+        # Ici on utilise update_one avec $set
+        self.dao.update_one({"_id": ObjectId(config_id)}, update_fields)
+        
+        return self.get_configuration(config_id=config_id)
     
     def delete_configuration(self, *, config_id: str) -> None:
         if not self.document_exists(id=config_id):

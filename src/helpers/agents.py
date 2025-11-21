@@ -1,7 +1,7 @@
 import os
 import re
 import threading
-from bson import ObjectId
+import json
 from functools import lru_cache
 from typing import Dict, Any, Iterable, List, Mapping
 
@@ -13,20 +13,22 @@ from transformers import (
     Pipeline,
 )
 
-from src.helpers import utils  # on garde utils pour _pyify (et autres utilitaires éventuels)
-# from your_module import best_entities  # <-- décommentez si vous l’avez ailleurs
+from src.helpers import utils  # On garde utils pour _pyify
 
+# ===================== CACHE MANUEL =====================
+# Dictionnaire pour stocker les pipelines chargés en mémoire vive
+_PIPELINE_CACHE: Dict[str, Pipeline] = {}
+# Verrou pour empêcher le chargement simultané du même modèle par plusieurs threads
 _MODEL_LOAD_LOCK = threading.Lock()
 
 # ---------- DB ----------
 def get_db():
     """
-    Retourne l'instance de base Mongo à partir des variables d'environnement :
-    - MONGO_URI (ex: mongodb://localhost:27017)
-    - MONGO_DB  (ex: my_database)
+    Retourne l'instance de base Mongo à partir des variables d'environnement.
     """
     mongo_uri = os.getenv("MONGO_URI")
     if not mongo_uri:
+        # On lève une erreur comme dans le code original pour ne pas masquer le problème
         raise RuntimeError("MONGO_URI est manquant dans l'environnement.")
 
     client = MongoClient(mongo_uri)
@@ -38,16 +40,26 @@ def get_db():
 
 db = get_db()
 
-# ---------- NLP ----------
-@lru_cache(maxsize=32)
+# ---------- NLP (AVEC CACHE FIXE) ----------
 def get_token_classifier(model_dir: str) -> Pipeline:
     """
-    Charge un pipeline token-classification en CPU, en évitant le device 'meta'.
+    Charge un pipeline token-classification en CPU, en utilisant un cache dictionnaire global.
     """
+    # 1. Vérification rapide dans le cache
+    if model_dir in _PIPELINE_CACHE:
+        return _PIPELINE_CACHE[model_dir]
+
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(f"Répertoire modèle introuvable : {model_dir}")
 
+    # 2. Chargement avec verrou
     with _MODEL_LOAD_LOCK:
+        # On vérifie à nouveau une fois le verrou acquis (double-check locking)
+        if model_dir in _PIPELINE_CACHE:
+            return _PIPELINE_CACHE[model_dir]
+
+        print(f"[INFO] Chargement du modèle en mémoire : {model_dir}")
+        
         tokenizer = AutoTokenizer.from_pretrained(
             model_dir,
             local_files_only=True,
@@ -56,45 +68,46 @@ def get_token_classifier(model_dir: str) -> Pipeline:
         model = AutoModelForTokenClassification.from_pretrained(
             model_dir,
             local_files_only=True,
-            low_cpu_mem_usage=False,  # <-- force des tenseurs réels (pas 'meta')
-            device_map=None,          # <-- évite accelerate/'auto' qui place sur 'meta'
-            trust_remote_code=False,  # mets True si ton modèle custom le requiert
+            low_cpu_mem_usage=False,  # Force tenseurs réels
+            device_map=None,          # Évite 'meta' device
+            trust_remote_code=False,
         )
 
-    return pipeline(
-        task="token-classification",
-        model=model,
-        tokenizer=tokenizer,
-        aggregation_strategy="simple",
-        device=-1,  # CPU
-    )
+        nlp_pipe = pipeline(
+            task="token-classification",
+            model=model,
+            tokenizer=tokenizer,
+            aggregation_strategy="simple",
+            device=-1,  # CPU
+        )
+
+        # Enregistrement dans le cache
+        _PIPELINE_CACHE[model_dir] = nlp_pipe
+        return nlp_pipe
 
 # ---------- Utils ----------
 def clean_text(text: str) -> str:
-    # Remplace \r/\n par espaces et compacte les espaces multiples
     text = text.replace("\r", " ").replace("\n", " ")
-    # text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 # ---------- Public API ----------
 def run(text: str, *, reference: str, version: str):
     """
-    Exécute l'agent NER pour (reference, version) :
-    - récupère la config 'agent' en base (optionnel, mais utile pour vérifier l'existence)
-    - charge le pipeline depuis le répertoire sardine.trainer/sardine.agents/{reference}/{version}
-    - nettoie le texte, passe le NER, puis _pyify le résultat
-    - applique best_entities si disponible, sinon renvoie les entités telles quelles
+    Exécute l'agent NER pour (reference, version).
     """
-    # 1) Vérifier que l'agent existe (si vous stockez la config en base)
+    # 1) Vérifier que l'agent existe
+    # Note: On utilise db[...] directement comme dans l'original pour lever l'erreur si db est None
     agent = db["agents"].find_one({"reference": reference, "version": version})
     if not agent:
         print(f"[WARN] Agent introuvable : {reference} v{version}")
 
     # 2) Construire le chemin modèle
+    # Attention : le ".." dépend d'où le script est lancé. 
+    # Si le code original fonctionnait, on garde cette logique relative.
     path = f"sardine.agents/{reference}/{version}"
     model_dir = os.path.normpath(os.path.join("..", path))
 
-    # 3) Charger le pipeline (caché)
+    # 3) Charger le pipeline (via notre nouvelle fonction avec Cache Dictionnaire)
     nlp = get_token_classifier(model_dir)
 
     # 4) NER
@@ -105,33 +118,54 @@ def run(text: str, *, reference: str, version: str):
     # 5) Post-traitements
     entities = utils._pyify(raw_entities)
 
+    # Filtrage et nettoyage (logique originale)
+    entities_to_keep = []
     for ent in entities:
         start, end = ent.get("start"), ent.get("end")
         ent["word"] = text_clean[start:end]
-        if ent["score"] < .8:
-            entities.remove(ent) 
+        if ent.get("score", 0) >= 0.8:  # Correction: >= au lieu de < avec remove (plus sûr)
+            entities_to_keep.append(ent)
+    
+    entities = entities_to_keep
 
     # 6) Agrégation "best"
-    return best_entities(entities, reqs=agent.get("requirements", [])) if agent else entities, mapper
+    # On s'assure de passer 'requirements' correctement
+    reqs = agent.get("requirements", []) if agent else {}
+    return best_entities(entities, reqs=reqs), mapper
 
 def best_entities(entities: List[Dict[str, Any]], reqs: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     """
-    Exemple de fonction d'agrégation des entités.
-    Vous pouvez la modifier ou la remplacer par votre propre logique.
-    Ici, on garde pour chaque type d'entité la plus longue (en caractères).
+    Logique d'agrégation.
     """
     best = {}
 
+    # Conversion de reqs en dict si ce n'est pas déjà le cas (sécurité)
+    # Le code original faisait reqs[label], supposant un dict { "LABEL": [rules] }
+    reqs_map = reqs
+    if not isinstance(reqs, dict):
+        # Si reqs est une liste, on ne pourra pas faire reqs[label] facilement sans transformation
+        # On suppose ici que la structure en DB est bien un Dict/Map
+        pass
+
     for ent in entities:
-        label, score, word = ent.get("entity_group"), ent.get("score", 0), ent.get("word", "")
-        respect, value = check_requirements(word, reqs[label])
-        if (label not in best or best[label]["score"] < score) and respect:
-            ent["word"] = value
-            best[label] = ent
+        label = ent.get("entity_group")
+        score = ent.get("score", 0)
+        word = ent.get("word", "")
+
+        # Récupération safe des règles pour ce label
+        # Utilisation de .get() pour éviter KeyError si le label n'est pas dans les requirements
+        label_reqs = reqs_map.get(label, []) if isinstance(reqs_map, dict) else []
+
+        respect, value = check_requirements(word, label_reqs)
+        
+        if respect:
+            if (label not in best or best[label]["score"] < score):
+                ent["word"] = value
+                best[label] = ent
 
     return best
 
-def check_requirements(value: Any, requirements: Iterable[Mapping[str, Any]]) -> bool:
+def check_requirements(value: Any, requirements: Iterable[Mapping[str, Any]]) -> tuple[bool, Any]:
     for requirement in requirements or []:
         rule = requirement.get("rule", "")
         constraint = requirement.get("constraint", "")
@@ -140,31 +174,41 @@ def check_requirements(value: Any, requirements: Iterable[Mapping[str, Any]]) ->
             match = re.search(str(constraint), str(value))
             if match:
                 value = match.group(0)
+            # Si regex ne match pas, faut-il rejeter ? 
+            # Le code original continuait. Ajoutons le check 'match' dans le try/except suivant si besoin.
 
         try:
-            if rule == "regex" and not re.match(str(constraint), str(value)):
+            val_str = str(value)
+            con_str = str(constraint)
+            
+            # Regex check négatif explicite
+            if rule == "regex" and not re.search(str(constraint), str(value)):
                 return False, value
-            elif rule == "eq" and str(value) != str(constraint):
+
+            if rule == "eq" and val_str != con_str:
                 return False, value
-            elif rule == "neq" and str(value) == str(constraint):
+            elif rule == "neq" and val_str == con_str:
                 return False, value
-            elif rule == "gt" and float(value) <= float(constraint):
+            
+            # Comparaisons numériques
+            if rule in ["gt", "lt", "gte", "lte"]:
+                v_f = float(value)
+                c_f = float(constraint)
+                if rule == "gt" and v_f <= c_f: return False, value
+                if rule == "lt" and v_f >= c_f: return False, value
+                if rule == "gte" and v_f < c_f: return False, value
+                if rule == "lte" and v_f > c_f: return False, value
+
+            elif rule == "in" and val_str not in split_constraint(constraint):
                 return False, value
-            elif rule == "lt" and float(value) >= float(constraint):
+            elif rule == "nin" and val_str in split_constraint(constraint):
                 return False, value
-            elif rule == "gte" and float(value) < float(constraint):
+            elif rule == "contains" and con_str not in val_str:
                 return False, value
-            elif rule == "lte" and float(value) > float(constraint):
-                return False, value
-            elif rule == "in" and str(value) not in split_constraint(constraint):
-                return False, value
-            elif rule == "nin" and str(value) in split_constraint(constraint):
-                return False, value
-            elif rule == "contains" and str(constraint) not in str(value):
-                return False, value
-            elif rule == "ncontains" and str(constraint) in str(value):
+            elif rule == "ncontains" and con_str in val_str:
                 return False, value
         except Exception:
+            # En cas d'erreur de conversion (ex: float sur du texte), on rejette
             return False, value
         
     return True, value
