@@ -70,6 +70,9 @@ def _register_blueprints(app: Flask, db: Database) -> None:
     from src.app.documents import create_documents_router
     api_bp.register_blueprint(create_documents_router(db), url_prefix="/documents")
 
+    from src.app.flows import create_flows_router
+    api_bp.register_blueprint(create_flows_router(db), url_prefix="/flows")
+
     app.register_blueprint(swaggerui_bp)
     app.register_blueprint(api_bp)
 
