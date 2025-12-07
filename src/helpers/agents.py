@@ -91,6 +91,8 @@ def run(text: str, *, reference: str, version: str):
         return {}, {}
 
     mapper = agent.get("mapper", {}) if agent else {}
+    print(f"[INFO] Agent '{reference}' v{version} - mapper: {mapper}")
+
     entities = utils._pyify(raw_entities)
     
     valid_entities = []
@@ -103,7 +105,8 @@ def run(text: str, *, reference: str, version: str):
     reqs = agent.get("requirements", []) if agent else []
     best_entities_result = best_entities(valid_entities, reqs)
 
-    print(f"[INFO] Agent '{reference}' v{version} extrait {len(best_entities_result)} entité(ies) pertinente(s).")
+    if len(best_entities_result) > 0:
+        print(f"[INFO] Agent '{reference}' v{version} - Entities found: {list(best_entities_result.keys())}")
 
     return best_entities_result, mapper
 
