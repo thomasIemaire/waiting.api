@@ -91,6 +91,8 @@ def run(text: str, *, reference: str, version: str):
         return {}, {}
 
     mapper = agent.get("mapper", {}) if agent else {}
+    print(f"[INFO] Agent '{reference}' v{version} - mapper: {mapper}")
+
     entities = utils._pyify(raw_entities)
     
     valid_entities = []
@@ -103,7 +105,8 @@ def run(text: str, *, reference: str, version: str):
     reqs = agent.get("requirements", []) if agent else []
     best_entities_result = best_entities(valid_entities, reqs)
 
-    print(f"[INFO] Agent '{reference}' v{version} extrait {len(best_entities_result)} entité(ies) pertinente(s).")
+    if len(best_entities_result) > 0:
+        print(f"[INFO] Agent '{reference}' v{version} - Entities found: {list(best_entities_result.keys())}")
 
     return best_entities_result, mapper
 
@@ -111,18 +114,34 @@ def best_entities(entities: List[Dict[str, Any]], reqs: Any) -> Dict[str, Any]:
     best = {}
     requirements_map = reqs if isinstance(reqs, dict) else {}
 
+    # Conserve la meilleure entité globale par label, même si les requirements échouent
+    best_overall = {}
+
     for ent in entities:
         label = ent.get("entity_group")
         score = ent.get("score", 0)
         word = ent.get("word", "")
-        
+
         specific_reqs = requirements_map.get(label, []) if requirements_map else []
         respect, value = check_requirements(word, specific_reqs)
-        
+
+        # Mise à jour du meilleur score brut (fallback si aucune entité ne passe les contraintes)
+        if label not in best_overall or score > best_overall[label]["score"]:
+            ent_any = ent.copy()
+            ent_any["word"] = value if respect else word
+            best_overall[label] = ent_any
+
         if respect:
             if label not in best or score > best[label]["score"]:
-                ent["word"] = value
-                best[label] = ent
+                ent_valid = ent.copy()
+                ent_valid["word"] = value
+                best[label] = ent_valid
+
+    # Si aucune entité ne satisfait les requirements, on renvoie la plus pertinente trouvée
+    for label, fallback_ent in best_overall.items():
+        if label not in best:
+            best[label] = fallback_ent
+
     return best
 
 def check_requirements(value: Any, requirements: Iterable[Mapping[str, Any]]) -> bool:
