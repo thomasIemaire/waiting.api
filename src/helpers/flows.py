@@ -185,9 +185,9 @@ def node_agent(config, text, *, debug=False):
     model = config.get("model", "")
     version = config.get("version", "")
     type = config.get("type", "single")
-    
+
     print(f"[FLOW-DEBUG] >>> Node Agent '{model}' (v{version}) STARTED")
-    
+
     if not text:
         print("[FLOW-DEBUG] [AGENT] WARNING: Input text is empty or None!")
     elif isinstance(text, list):
@@ -195,30 +195,38 @@ def node_agent(config, text, *, debug=False):
     else:
         print(f"[FLOW-DEBUG] [AGENT] Input text length: {len(str(text))}")
 
-    # Conversion en liste de strings (gestion des pages OCR)
-    if not isinstance(text, list): text = [text]
+    # Conversion en liste de zones indépendantes
+    if not isinstance(text, list):
+        text = [text]
+
     processed_text_list = []
     for t in text:
         if isinstance(t, list):
-            # t est une liste de lignes (OCR), on en fait un seul texte avec sauts de ligne
-            processed_text_list.append("\n".join([str(line) for line in t]))
+            # t peut représenter toutes les zones d'une page -> on traite chaque zone indépendamment
+            for zone in t:
+                if isinstance(zone, list):
+                    processed_text_list.append("\n".join([str(line) for line in zone]))
+                elif isinstance(zone, dict) and zone.get("type") == "table":
+                    processed_text_list.append(" ".join(zone.get("header", [])))
+                else:
+                    processed_text_list.append(str(zone))
         elif isinstance(t, dict) and t.get("type") == "table":
             processed_text_list.append(" ".join(t.get("header", [])))
         else:
             processed_text_list.append(str(t))
 
     # --- AGREGATION ---
-    # On parcourt TOUTES les zones (pages) et on garde le meilleur résultat pour chaque champ
+    # On parcourt TOUTES les zones et on garde le meilleur résultat pour chaque champ
     aggregated_entities = {} # { "LABEL": {"word": "...", "score": ...} }
     mapper_template = {}
 
-    for page_text in processed_text_list:
-        current_entities, mapper = run_agent(page_text, reference=model, version=version)
-        
+    for zone_text in processed_text_list:
+        current_entities, mapper = run_agent(zone_text, reference=model, version=version)
+
         # On sauvegarde le template de mapper s'il n'est pas encore défini
         if mapper and not mapper_template:
             mapper_template = mapper
-        
+
         # Fusion intelligente: on garde le meilleur score pour chaque label
         for label, entity in current_entities.items():
             score = entity.get("score", 0)
@@ -235,7 +243,7 @@ def node_agent(config, text, *, debug=False):
             mapper_str = mapper_str.replace(f'"{label}"', json.dumps(val)) # Clé directe
             token = f"{model.upper()}_{label.upper()}"
             mapper_str = mapper_str.replace(f'"{token}"', json.dumps(val)) # Token complet
-        
+
         mapper_str = clean_tokens(mapper_str, model)
         try:
             final_mapper = json.loads(mapper_str)
@@ -632,7 +640,7 @@ def process_node(flow, node, *, id=None, debug=False, data=None):
     while parents:
         ignored_by = set(node.get("ignored_by") or [])
         needed_parents = [p for p in parents if p not in ignored_by]
-        
+
         # Branche morte
         if not needed_parents and parents:
              print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) is in an ignored branch. Stopping.")
@@ -642,24 +650,38 @@ def process_node(flow, node, *, id=None, debug=False, data=None):
         if all(flow[p].get("status") == "processed" for p in needed_parents):
             print(f"[FLOW-DEBUG] All parents processed for node {node.get('type')} ({id}). Proceeding.")
             break
-        
+
         time.sleep(0.05)
 
     # --- FIX MERGE : VERROUILLAGE ---
     # On utilise un verrou par nœud pour s'assurer qu'un seul thread parent déclenche l'exécution
     lock = _get_node_lock(id)
+    event = _event_for(id)
     with lock:
-        if node.get("status") in ["processing", "processed"]:
-            print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) already processed/processing. Skipping duplicate execution.")
+        status = node.get("status")
+        if status == "processing":
+            print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) already processing. Waiting for completion to avoid duplicates.")
+            # Libère le verrou et attend la fin d'exécution existante
+            pass
+        elif status == "processed":
+            print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) already processed. Reusing existing result.")
             return data
-        
-        node["status"] = "processing"
+        else:
+            node["status"] = "processing"
+            event.clear()
+            status = "start-processing"
+
+    if status == "processing":
+        event.wait()
+        return data
 
     # Exécution du nœud
-    nos, data = process_type(flow, node, nid=id, debug=debug, data=data)
-    
-    # Marquer comme terminé
-    node["status"] = "processed"
+    try:
+        nos, data = process_type(flow, node, nid=id, debug=debug, data=data)
+    finally:
+        # Marquer comme terminé (même en cas d'exception) pour libérer les éventuels appels concurrents
+        node["status"] = "processed"
+        event.set()
 
     # Lancement des enfants en parallèle
     threads = []
@@ -713,8 +735,12 @@ def run(flow, *, base64=None, debug=False):
 
     start = time.time()
     
-    # Reset status
-    for n in flow.values(): n["status"] = "pending"
+    # Reset status & events to avoid stale synchronization between runs
+    NODE_EVENTS.clear()
+    for nid, n in flow.items():
+        n["status"] = "pending"
+        # Prépare les events utilisés pour synchroniser les nœuds
+        NODE_EVENTS[nid] = threading.Event()
     
     start_node = find_start_node(flow)
     if not start_node:
