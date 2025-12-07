@@ -40,7 +40,7 @@ class ModelsService(BaseService):
         if self.document_exists(query={"reference": model_reference}):
             raise ValueError("La référence du modèle existe déjà")
 
-        configuration_id = model_data.get("configuration")
+        configuration_id = model_data.get("configuration", None)
         config_ref = ObjectId(str(configuration_id)) if configuration_id else None
 
         user = self.user_service.find_user_by_id_basic(user_id)
@@ -170,7 +170,7 @@ class ModelsService(BaseService):
         self.dao.delete_one({"_id": ObjectId(id)})
 
     def find_by_status(self, status: str):
-        models = self.dao.find(query={"status": status}, projection={"mapper": 0, "configuration": 0})
+        models = self.dao.find(query={"status": status}, projection={"mapper": 0})
         return self.dao.serialize(models)
 
     def update_status(self, model_id: str, status: str, *, user_id: str | None = None) -> dict:
@@ -202,11 +202,16 @@ class ModelsService(BaseService):
         user = self.user_service.find_user_by_id_basic(user_id)
 
         configuration_id = model.get("configuration")
-        # if not configuration_id:
-        #     raise ValueError("Model configuration is missing")
+        if not configuration_id:
+            raise ValueError("Model configuration is missing")
 
         model["model_id"] = model.pop("_id")
         parameters = parameters or {}
+
+        self.dao.update_one(
+            {"_id": ObjectId(model_id)},
+            {"version": utils.increment_version(model.get("version", "1.0"), "minor")}
+        )
 
         dataset_payload = {
             **model,

@@ -9,7 +9,7 @@ def create_datasets_router(db: Database) -> Blueprint:
     bp = Blueprint("datasets", __name__)
     service = DatasetsService(db)
 
-    @bp.get("/")
+    @bp.get("")
     @jwt_required()
     def find_datasets():
         docs = service.find_all()

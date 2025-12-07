@@ -1,12 +1,19 @@
-import threading, time
+import threading, time, re, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.helpers.agents import run as run_agent
-from src.helpers.sardine import inference as run_sardine
-
-import re, json
+# On importe les fonctions séparées depuis le nouveau sardine.py
+from src.helpers.sardine import load_images, predict_classification, predict_detection
 
 STATUS_LOCK = threading.Lock()
+
+# Verrou spécifique pour empêcher l'exécution multiple d'un même nœud (ex: Merge)
+NODE_EXEC_LOCKS = {} 
+def _get_node_lock(nid):
+    if nid not in NODE_EXEC_LOCKS:
+        NODE_EXEC_LOCKS[nid] = threading.Lock()
+    return NODE_EXEC_LOCKS[nid]
+
 NODE_EVENTS: dict[str, threading.Event] = {}
 
 def _event_for(nid: str) -> threading.Event:
@@ -28,12 +35,10 @@ def _parse_money_fr(s) -> float:
     if s is None: return 0.0
     if isinstance(s, (int, float)): return float(s)
     s = str(s).replace("€", "").replace("\u00a0", " ").strip()
-    # garder chiffres + , . -
     s = "".join(ch for ch in s if ch.isdigit() or ch in ",.-")
     if not s: return 0.0
-    # virgule = décimal FR
     if "," in s and "." not in s:
-        s = s.replace(".", "")  # points de milliers éventuels
+        s = s.replace(".", "")
         s = s.replace(",", ".")
     try:
         return float(s)
@@ -41,16 +46,10 @@ def _parse_money_fr(s) -> float:
         return 0.0
 
 def _parse_percent_fr(s) -> float:
-    """ '20,00' -> 0.20 ; '' -> 0.0 """
     v = _parse_money_fr(s)
     return v/100.0 if v > 0 else 0.0
 
 def _iter_lines(line_dict: dict):
-    """
-    line_dict ressemble à:
-      { "label":[...], "quantity":[...], "unitprice":[...], "totalprice":[...], "tva":[...] }
-    On itère ligne par ligne en renvoyant un tuple de valeurs par index.
-    """
     if not isinstance(line_dict, dict):
         return
     keys = ["label", "quantity", "unitprice", "totalprice", "tva", "reference"]
@@ -67,19 +66,13 @@ def _iter_lines(line_dict: dict):
         }
 
 def _amounts_from_lines(line_dict: dict) -> dict:
-    """
-    Retourne un dict: {"ht": float, "tva": float, "ttc": float}
-    en calculant par ligne: ht, tva=ht*rate, ttc=ht+tva.
-    """
     total_ht = total_tva = 0.0
     for row in _iter_lines(line_dict):
         q  = _parse_money_fr(row["quantity"])
         pu = _parse_money_fr(row["unitprice"])
         tp = _parse_money_fr(row["totalprice"])
         rate = _parse_percent_fr(row["tva"])
-        # HT de la ligne
         ht_line = tp if tp > 0 else (q * pu if q > 0 and pu > 0 else 0.0)
-        # TVA de la ligne
         tva_line = ht_line * rate
         total_ht  += ht_line
         total_tva += tva_line
@@ -88,8 +81,6 @@ def _amounts_from_lines(line_dict: dict) -> dict:
 def _sum_list_money_fr(values) -> float:
     total = 0.0
     if isinstance(values, dict):
-        # si c'est la colonne 'totalprice' sous forme dict/colonne => prendre valeurs
-        # mais chez toi c'est souvent une list déjà
         values = list(values.values())
     if not isinstance(values, list):
         return _parse_money_fr(values)
@@ -98,10 +89,6 @@ def _sum_list_money_fr(values) -> float:
     return total
 
 def _text_from_pages(data) -> str:
-    """
-    Concatène tous les textes simples présents dans data['pages'] (profondément),
-    utile pour regex globales ("Total HT ...", etc.)
-    """
     pages = data.get("pages", [])
     chunks = []
 
@@ -112,7 +99,6 @@ def _text_from_pages(data) -> str:
             for e in x:
                 walk(e)
         elif isinstance(x, dict):
-            # tables: header/columns
             if x.get("type") == "table":
                 hdr = x.get("header", [])
                 cols = x.get("columns", [])
@@ -132,34 +118,65 @@ def _text_from_pages(data) -> str:
 
 
 # ============ Node Actions ============
-def node_sardine(config, *, base64=None, debug=False):
+
+def node_sardine(config, *, base64=None, debug=False, data=None):
+    print(f"[FLOW-DEBUG] >>> Node Sardine STARTED")
     accepted_files = config.get("accepted_files", [])
-
-    if not base64:
-        print_debug("[SARDINE] No base64 provided", debug)
-        return False, "unknown", []
-
-    dir_to_del = "../sardine.agents"
-    cls, pages = run_sardine(
-        model_detect_path=f"{dir_to_del}/sard-det/best.pt",
-        model_class_path=f"{dir_to_del}/sard-cls/best.pt",
-        model_table_path=f"{dir_to_del}/sard-tbl/last.pt",
-        img_b64=base64,
-        device="cpu",
-        conf_det=.3,
-        conf_tbl=.5,
-        pdf_dpi=768
+    print(f"[FLOW-DEBUG] Sardine accepted files: {accepted_files}")
+    
+    # 1. Chargement des images (mise en cache dans data pour éviter rechargement PDF)
+    if data is not None and data.get("_pil_images") is None and base64:
+        data["_pil_images"] = load_images(base64, pdf_dpi=768)
+    
+    images = data.get("_pil_images", []) if data else []
+    
+    # 2. Classification uniquement
+    dir_agents = "../sardine.agents"
+    # On suppose que le modèle de classification est dans sardine.agents/sard-cls
+    cls = predict_classification(
+        images, 
+        model_path=f"{dir_agents}/sard-cls/best.pt", 
+        device="cpu"
     )
+    
+    # Pages vide ici, sera rempli par zone-detection
+    pages = [] 
 
-    print_debug(f"[SARDINE] Classified as: {cls}", debug)
+    print(f"[FLOW-DEBUG] [SARDINE] Classified as: {cls}")
 
-    return cls in accepted_files, cls, pages
+    is_valid = cls in accepted_files
+    print(f"[FLOW-DEBUG] <<< Node Sardine FINISHED. Valid? {is_valid}")
+    return is_valid, cls, pages
+
+def node_zone_detection(config, *, base64=None, debug=False, data=None):
+    print(f"[FLOW-DEBUG] >>> Node Zone Detection STARTED")
+    
+    # 1. Récupération des images du cache
+    if data is not None and data.get("_pil_images") is None and base64:
+        data["_pil_images"] = load_images(base64, pdf_dpi=768)
+    
+    images = data.get("_pil_images", []) if data else []
+
+    # 2. Détection et OCR uniquement
+    dir_agents = "../sardine.agents"
+    # On suppose que le modèle de détection est dans sardine.agents/sard-det
+    pages = predict_detection(
+        images, 
+        model_path=f"{dir_agents}/sard-det/best.pt",
+        device="cpu",
+        conf=0.3
+    )
+    
+    # On récupère le type déjà classifié s'il existe (via Sardine), sinon unknown
+    cls = data.get("type", "unknown") if data else "unknown"
+
+    print(f"[FLOW-DEBUG] [ZONE-DETECTION] Extracted zones for type: {cls}, Pages count: {len(pages)}")
+    print(f"[FLOW-DEBUG] <<< Node Zone Detection FINISHED")
+    return True, cls, pages
 
 def clean_tokens(mapper_str: str, model: str) -> str:
     model_upper = model.upper()
-    
     pattern = rf'(?<="){re.escape(model_upper)}(?:_[A-Za-z]+)*(?=")'
-    
     cleaned = re.sub(pattern, '', mapper_str)
     cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
     return cleaned
@@ -168,173 +185,138 @@ def node_agent(config, text, *, debug=False):
     model = config.get("model", "")
     version = config.get("version", "")
     type = config.get("type", "single")
-
-    def process_chunk(chunk):
-        """Traite un sous-ensemble de textes (chunk) séquentiellement."""
-        best_result, max_score, mapper = {}, 0, {}
-        for t in chunk:
-
-            # 👉 Si on est en mode "list", on ne garde que les tables
-            if type == "list" and not (isinstance(t, dict) and t.get("type") == "table"):
-                continue
-
-            # Logique existante pour distinguer texte simple vs table
-            t, table = (
-                " ".join(t.get("header", [])), t
-            ) if isinstance(t, dict) and t.get("type") == "table" else (t, None)
-
-            print_debug(f"[AGENT] Processed text chunk: {t}", debug and table is not None)
-
-            current, mapper = run_agent(t, reference=model, version=version)
-            temp = sum(v["score"] for v in current.values())
-            res = {k: v["word"] for k, v in current.items()}
-            if temp > max_score:
-                max_score, best_result = temp, res
-            
-            if table is not None:
-                headers = table.get("header", [])
-                columns = table.get("columns", [])
-
-                for k, v in best_result.items():
-                    if not isinstance(v, str):
-                        continue
-                    for i, col in enumerate(headers):
-                        if isinstance(col, str) and (v in col or v == col or v.replace(" ", "") == col.replace(" ", "")):
-                            best_result[k] = columns[i]
-                            break
-
-                print_debug(f"[AGENT] Table mapping applied: {best_result}", debug)
-
-        mapper_str = json.dumps(mapper, ensure_ascii=False)
-
-        for k, v in best_result.items():
-            mapper_str = mapper_str.replace(f'"{k}"', json.dumps(v))
-
-        mapper_str = clean_tokens(mapper_str, model)
-
-        mapper = json.loads(mapper_str)
-
-        return max_score, best_result, mapper
-
-    if not isinstance(text, list):
-        text = [text]
-
-    best_result, max_score, mapper = {}, 0, {}
-
-    max_workers = 1
-    if len(text) <= max_workers:
-        text_chunks = [[t] for t in text]
+    
+    print(f"[FLOW-DEBUG] >>> Node Agent '{model}' (v{version}) STARTED")
+    
+    if not text:
+        print("[FLOW-DEBUG] [AGENT] WARNING: Input text is empty or None!")
+    elif isinstance(text, list):
+        print(f"[FLOW-DEBUG] [AGENT] Input text is a list of {len(text)} elements.")
     else:
-        chunk_size = (len(text) + max_workers - 1) // max_workers
-        text_chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        print(f"[FLOW-DEBUG] [AGENT] Input text length: {len(str(text))}")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_chunk, chunk): chunk for chunk in text_chunks}
+    # Conversion en liste de strings (gestion des pages OCR)
+    if not isinstance(text, list): text = [text]
+    processed_text_list = []
+    for t in text:
+        if isinstance(t, list):
+            # t est une liste de lignes (OCR), on en fait un seul texte avec sauts de ligne
+            processed_text_list.append("\n".join([str(line) for line in t]))
+        elif isinstance(t, dict) and t.get("type") == "table":
+            processed_text_list.append(" ".join(t.get("header", [])))
+        else:
+            processed_text_list.append(str(t))
 
-        for future in as_completed(futures):
-            try:
-                temp, res, map = future.result()
-                if temp > max_score:
-                    max_score, best_result, mapper = temp, res, map
-            except Exception as e:
-                print_debug(f"[AGENT] Error on chunk {futures[future]}: {e}", debug)
+    # --- AGREGATION ---
+    # On parcourt TOUTES les zones (pages) et on garde le meilleur résultat pour chaque champ
+    aggregated_entities = {} # { "LABEL": {"word": "...", "score": ...} }
+    mapper_template = {}
 
-    result = mapper
+    for page_text in processed_text_list:
+        current_entities, mapper = run_agent(page_text, reference=model, version=version)
         
-    print_debug(f"[AGENT] Final Result: {result}", debug)
-    return result
+        # On sauvegarde le template de mapper s'il n'est pas encore défini
+        if mapper and not mapper_template:
+            mapper_template = mapper
+        
+        # Fusion intelligente: on garde le meilleur score pour chaque label
+        for label, entity in current_entities.items():
+            score = entity.get("score", 0)
+            if label not in aggregated_entities or score > aggregated_entities[label].get("score", 0):
+                aggregated_entities[label] = entity
+
+    # Construction du résultat final à partir des meilleures entités trouvées
+    final_mapper = {}
+    if mapper_template:
+        mapper_str = json.dumps(mapper_template, ensure_ascii=False)
+        for label, entity in aggregated_entities.items():
+            val = entity.get("word", "")
+            # Remplacement intelligent
+            mapper_str = mapper_str.replace(f'"{label}"', json.dumps(val)) # Clé directe
+            token = f"{model.upper()}_{label.upper()}"
+            mapper_str = mapper_str.replace(f'"{token}"', json.dumps(val)) # Token complet
+        
+        mapper_str = clean_tokens(mapper_str, model)
+        try:
+            final_mapper = json.loads(mapper_str)
+        except:
+            print("[FLOW-DEBUG] [AGENT] Error parsing JSON mapper result.")
+            final_mapper = {}
+    elif aggregated_entities:
+        # Fallback si pas de mapper (ex: mode sans config)
+        final_mapper = {k: v["word"] for k, v in aggregated_entities.items()}
+
+    print(f"[FLOW-DEBUG] <<< Agent '{model}' Result keys (Aggregated): {list(final_mapper.keys())}")
+    return final_mapper
 
 def node_agent_group(config, text, *, debug=False):
     agents = config.get("agents", [])
+    print(f"[FLOW-DEBUG] >>> Node Agent Group ({len(agents)} agents) STARTED")
 
-    def run_all_agents_on_text(t):
-        """
-        Fait passer tous les agents sur un texte t.
-        - total_score: somme des scores sur tous les agents (et toutes les clés).
-        - merged_result: dict {clé: word} où, par clé, on garde le word de l'agent avec le score le plus élevé.
-        """
-        total_score = 0
-        merged_result = {}
-        best_score_per_key = {}
-        mapper_combined = []
+    # Conversion en liste de strings
+    if not isinstance(text, list): text = [text]
+    processed_text_list = []
+    for t in text:
+        if isinstance(t, list):
+            processed_text_list.append("\n".join([str(line) for line in t]))
+        elif isinstance(t, dict) and t.get("type") == "table":
+            processed_text_list.append(" ".join(t.get("header", [])))
+        else:
+            processed_text_list.append(str(t))
 
+    # Agrégation globale pour le groupe
+    aggregated_entities_by_agent = {} # { agent_model: { LABEL: best_entity } }
+    mappers_by_agent = {}
+
+    for page_text in processed_text_list:
         for agent in agents:
             model = agent.get("model", "")
             version = agent.get("version", "")
+            
+            if model not in aggregated_entities_by_agent:
+                aggregated_entities_by_agent[model] = {}
 
-            if isinstance(t, dict) and t.get("type") == "table":
-                t = " ".join(t.get("header", []))
+            current, mapper = run_agent(page_text, reference=model, version=version)
+            
+            if mapper and model not in mappers_by_agent:
+                mappers_by_agent[model] = mapper
 
-            current, mapper = run_agent(t, reference=model, version=version)
+            for label, entity in current.items():
+                score = entity.get("score", 0)
+                best_so_far = aggregated_entities_by_agent[model].get(label)
+                if not best_so_far or score > best_so_far.get("score", 0):
+                    aggregated_entities_by_agent[model][label] = entity
 
-            # cumul des scores au niveau "agent"
-            total_score += sum(v["score"] for v in current.values())
-
-            mapper_combined.append(mapper)
-
-            # fusion par clé: on garde le "word" avec le meilleur score
-            for k, v in current.items():
-                s = v["score"]
-                if k not in best_score_per_key or s > best_score_per_key[k]:
-                    best_score_per_key[k] = s
-                    merged_result[k] = v["word"]
-                    t = t.replace(v["word"], "\<" + v["word"] + "\>")  # pour debug
+    # Construction du résultat final combiné
+    final_combined_mapper = {}
+    
+    # On itère sur chaque agent pour reconstruire son morceau de JSON
+    for agent in agents:
+        model = agent.get("model", "")
+        mapper_template = mappers_by_agent.get(model, {})
+        best_entities = aggregated_entities_by_agent.get(model, {})
         
-        mapper_str = json.dumps(mapper_combined, ensure_ascii=False)
-
-        for k, v in merged_result.items():
-            safe_v = json.dumps(v, ensure_ascii=False)[1:-1]
-            mapper_str = mapper_str.replace(k, safe_v)
-
-        mapper_str = clean_tokens(mapper_str, model)
-        
-        mapper_combined = json.loads(mapper_str)
-
-        return total_score, merged_result, mapper_combined
-
-    # ----------- Cas liste de textes : même logique de chunking que node_agent -----------
-    if isinstance(text, list):
-        best_result, max_score, mapper = {}, 0, {}
-
-        # même paramétrage que node_agent
-        max_workers = 1
-        if len(text) <= max_workers:
-            text_chunks = [[t] for t in text]
+        if mapper_template:
+            m_str = json.dumps(mapper_template, ensure_ascii=False)
+            for label, ent in best_entities.items():
+                val = ent.get("word", "")
+                m_str = m_str.replace(f'"{label}"', json.dumps(val))
+                token = f"{model.upper()}_{label.upper()}"
+                m_str = m_str.replace(f'"{token}"', json.dumps(val))
+            
+            m_str = clean_tokens(m_str, model)
+            try:
+                agent_res = json.loads(m_str)
+                # Merge dans le résultat final (attention aux écrasements si clés identiques)
+                final_combined_mapper.update(agent_res)
+            except:
+                pass
         else:
-            chunk_size = (len(text) + max_workers - 1) // max_workers
-            text_chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+             # Fallback
+             final_combined_mapper.update({k: v["word"] for k, v in best_entities.items()})
 
-        def process_chunk(chunk):
-            """Évalue séquentiellement les textes d'un chunk avec tous les agents, retourne le meilleur."""
-            chunk_best_result, chunk_max_score = {}, 0
-            for t in chunk:
-                score, merged, map = run_all_agents_on_text(t)
-                if score > chunk_max_score:
-                    chunk_max_score, chunk_best_result, mapper = score, merged, map
-            return chunk_max_score, chunk_best_result, mapper
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_chunk, chunk): chunk for chunk in text_chunks}
-
-            for future in as_completed(futures):
-                try:
-                    temp, res, map = future.result()
-                    if temp > max_score:
-                        max_score, best_result, mapper = temp, res, map
-                except Exception as e:
-                    print_debug(f"[AGENT-GROUP] Error on chunk {futures[future]}: {e}", debug)
-                
-                print(mapper)
-
-        result = mapper
-
-    # ----------- Cas texte unique -----------
-    else:
-        _, merged, mapper = run_all_agents_on_text(text)
-        result = mapper
-
-    print_debug(f"[AGENT-GROUP] Final Result: {result}", debug)
-    return result
+    print(f"[FLOW-DEBUG] <<< Node Agent Group FINISHED. Result keys: {list(final_combined_mapper.keys())}")
+    return final_combined_mapper
 
 def get_by_path(d, path):
     cur = d
@@ -354,13 +336,13 @@ def set_by_path(d, path, value):
     cur[keys[-1]] = value
 
 _slice_re = re.compile(r'^([A-Za-z0-9_.]+)(?:\[(\-?\d*):(\-?\d*)\])?$')
-
 _expr_sum   = re.compile(r'^sum\(([^)]+)\)$')
 _expr_calc  = re.compile(r'^calc_ttc\(\s*([A-Za-z0-9_.]+)\s*,\s*([A-Za-z0-9_.]+)\s*\)$')
 _expr_lines_ht  = re.compile(r'^lines_ht\(\s*([A-Za-z0-9_.]+)\s*\)$')
 _expr_lines_tva = re.compile(r'^lines_tva\(\s*([A-Za-z0-9_.]+)\s*\)$')
 _expr_lines_ttc = re.compile(r'^lines_ttc\(\s*([A-Za-z0-9_.]+)\s*\)$')
 _expr_lines_all = re.compile(r'^lines_amounts\(\s*([A-Za-z0-9_.]+)\s*\)$')
+_template_var_re = re.compile(r'\{\{([A-Za-z0-9_.]+)\}\}')
 
 def _get_by_path_any(d, path):
     return get_by_path(d, path)
@@ -368,42 +350,39 @@ def _get_by_path_any(d, path):
 def resolve_value(value, data):
     if isinstance(value, str):
         v = value.strip()
+        full_match = _template_var_re.fullmatch(v)
+        if full_match:
+            return get_by_path(data, full_match.group(1))
+        
+        if "{{" in v:
+            def replace_var(m):
+                val = get_by_path(data, m.group(1))
+                return str(val) if val is not None else ""
+            v = _template_var_re.sub(replace_var, v)
+            if re.match(r'^[\d\.\s\+\-\*\/\(\)]+$', v):
+                try:
+                    return eval(v)
+                except Exception:
+                    pass
+            return v
 
-        # nouvelles fonctions basées sur les lignes
         m = _expr_lines_all.match(v)
-        if m:
-            path = m.group(1)
-            line_obj = _get_by_path_any(data, path)
-            return _amounts_from_lines(line_obj)
-
+        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))
         m = _expr_lines_ht.match(v)
-        if m:
-            line_obj = _get_by_path_any(data, m.group(1))
-            return _amounts_from_lines(line_obj)["ht"]
-
+        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))["ht"]
         m = _expr_lines_tva.match(v)
-        if m:
-            line_obj = _get_by_path_any(data, m.group(1))
-            return _amounts_from_lines(line_obj)["tva"]
-
+        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))["tva"]
         m = _expr_lines_ttc.match(v)
-        if m:
-            line_obj = _get_by_path_any(data, m.group(1))
-            return _amounts_from_lines(line_obj)["ttc"]
-
-        # existant
+        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))["ttc"]
         m = _expr_sum.match(v)
         if m:
-            path = m.group(1).strip()
-            arr = _get_by_path_any(data, path)
-            return _parse_money_fr(arr) if not isinstance(arr, list) else sum(_parse_money_fr(x) for x in arr)
-
+            arr = _get_by_path_any(data, m.group(1).strip())
+            return _sum_list_money_fr(arr)
         m = _expr_calc.match(v)
         if m:
             ht = _get_by_path_any(data, m.group(1).strip())
             tv = _get_by_path_any(data, m.group(2).strip())
             return (_parse_money_fr(ht) + _parse_money_fr(tv))
-
         m = _slice_re.match(v)
         if m:
             path, s, e = m.group(1), m.group(2), m.group(3)
@@ -418,15 +397,11 @@ def resolve_value(value, data):
 def node_edit(config, data):
     key = config.get("key")
     raw_value = config.get("value")
-
-    # calcule la valeur finale si c'est une référence
+    if not key: return data
     value = resolve_value(raw_value, data)
-    if value == 0 or value == "0" or value == "":
-        return data
-
-    # support des chemins pointés pour la clé
     set_by_path(data, key, value)
     return data
+
 # ============ Flow Processing ============
 def ignored_node(flow, o2i, ignored_by: str):
     for nid in o2i:
@@ -445,19 +420,23 @@ def process_outputs(node, *, output_keys: list[str] = []):
     o2v, o2i = [], []
     ks = ["base"] + output_keys
 
+    # Log pour voir où ça part
+    print(f"[FLOW-DEBUG] Resolving outputs for node {node.get('type')}. Keys active: {ks}")
+
     for out in outs:
         if out in ks:
             o2v.extend(outs[out])
         else:
             o2i.extend(outs[out])
 
+    print(f"[FLOW-DEBUG] Valid Outputs: {o2v} | Ignored Outputs: {o2i}")
     return o2v, o2i
 
 def process_type(flow, node, *, data={}, nid=None, debug=False):
     node_type = node.get("type")
     node_config = node.get("config", {})
 
-    print_debug(f"[INFO] Start processing type: {node_type}", debug)
+    print(f"[FLOW-DEBUG] START Processing Node: {node_type} (ID: {nid})")
     start = time.time()
 
     node_outputs = None
@@ -471,74 +450,226 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
         case "end":
             time.sleep(0)
         case "if":
-            result = True
-            output_state = bool2str(result)
-            node_outputs, o2i = process_outputs(node, output_keys=[output_state])
+            conditions = node_config.get("conditions", [])
+            matched_index = -1
+            
+            for i, cond in enumerate(conditions):
+                rules = cond.get("rules")
+                if not rules:
+                    rules = [{"left": cond.get("left"), "operator": cond.get("operator", "=="), "right": cond.get("right")}]
+                
+                logic = cond.get("logic", "AND")
+                results = []
+
+                for rule in rules:
+                    left_val = resolve_value(rule.get("left"), data)
+                    right_val = resolve_value(rule.get("right"), data)
+                    op = rule.get("operator", "==")
+                    
+                    res = False
+                    try:
+                        try:
+                            l_num, r_num = float(left_val), float(right_val)
+                            is_num = True
+                        except (ValueError, TypeError):
+                            is_num = False
+
+                        if op == "==": res = (str(left_val) == str(right_val))
+                        elif op == "!=": res = (str(left_val) != str(right_val))
+                        elif op == "contains": res = (str(right_val) in str(left_val))
+                        elif is_num:
+                            if op == ">": res = (l_num > r_num)
+                            elif op == ">=": res = (l_num >= r_num)
+                            elif op == "<": res = (l_num < r_num)
+                            elif op == "<=": res = (l_num <= r_num)
+                        else:
+                            l_str, r_str = str(left_val), str(right_val)
+                            if op == ">": res = (l_str > r_str)
+                            elif op == ">=": res = (l_str >= r_str)
+                            elif op == "<": res = (l_str < r_str)
+                            elif op == "<=": res = (l_str <= r_str)
+                    except Exception as e:
+                        print(f"[IF NODE ERROR] {e}")
+                        res = False
+                    results.append(res)
+
+                if (logic == "OR" and any(results)) or (logic == "AND" and all(results)):
+                    matched_index = i
+                    break
+            
+            if matched_index >= 0:
+                print(f"[FLOW-DEBUG] IF matched index: {matched_index}")
+                output_keys = [f"Case {matched_index+1}"]
+                if len(node.get("outputs", {})) == 2 and "true" in node.get("outputs", {}):
+                     node_outputs, o2i = process_outputs(node, output_keys=["true" if matched_index == 0 else "false"])
+                else:
+                     available_keys = list(node.get("outputs", {}).keys())
+                     if matched_index < len(available_keys):
+                         node_outputs, o2i = process_outputs(node, output_keys=[available_keys[matched_index]])
+
         case "switch":
-            time.sleep(0)
+            key = node_config.get("key")
+            val = get_by_path(data, key)
+            val_str = str(val) if val is not None else ""
+            
+            active_key = "default"
+            cases = node_config.get("cases", [])
+            for c in cases:
+                c_val = resolve_value(c.get("value"), data)
+                if str(c_val) == val_str:
+                    active_key = c.get("name")
+                    break
+            print(f"[FLOW-DEBUG] SWITCH active key: {active_key}")
+            node_outputs, o2i = process_outputs(node, output_keys=[active_key])
+
         case "merge":
             time.sleep(0)
         case "edit":
-            if current_type:
-                result = node_edit(node_config, data[current_type])
-                data[current_type] = data[current_type] | result
+            fields = node_config.get("fields", [])
+            if fields:
+                for f in fields:
+                    data = node_edit(f, data)
+            else:
+                data = node_edit(node_config, data)
+                
         case "sardine":
-            valid, doc_type, pages = node_sardine(node_config, base64=flow['base64'], debug=debug)
-            output_state = "valid" if valid else "invalid"
+            print(f"[FLOW-DEBUG] Running Sardine node...")
+            # Passe 'data' pour le cache d'images
+            valid, doc_type, pages = node_sardine(
+                node_config, 
+                base64=flow.get('base64'), 
+                debug=debug, 
+                data=data
+            )
+            
+            available_outs = node.get("outputs", {})
+            
+            if valid:
+                if "valide" in available_outs: output_state = "valide"
+                else: output_state = "valid"
+            else:
+                if "invalide" in available_outs: output_state = "invalide"
+                else: output_state = "invalid"
+
+            print(f"[FLOW-DEBUG] Sardine Output State: {output_state} (Based on available: {list(available_outs.keys())})")
+            
             node_outputs, o2i = process_outputs(node, output_keys=[output_state])
+            
             data["type"] = doc_type
+            # On n'écrase pas les pages si déjà présentes (car Sardine ne fait que classification ici)
+            if not data.get("pages"):
+                data["pages"] = pages 
+            if doc_type not in data:
+                data[doc_type] = {}
+
+        case "zone-detection":
+            print(f"[FLOW-DEBUG] Running Zone Detection node...")
+            # Passe 'data' pour le cache d'images
+            _, doc_type, pages = node_zone_detection(
+                node_config, 
+                base64=flow.get('base64'), 
+                debug=debug, 
+                data=data
+            )
+            
+            # Ici on met à jour le type et les pages (vrais résultats OCR)
+            if doc_type != "unknown":
+                data["type"] = doc_type
             data["pages"] = pages
-            data[doc_type] = {}
+            
+            if data.get("type") and data["type"] not in data:
+                data[data["type"]] = {}
+            
+            node_outputs, o2i = process_outputs(node)
+
         case "agent":
-            result = node_agent(node_config, data.get("pages", [])[0], debug=debug)
+            pages_text = data.get("pages", [])
+            if not pages_text:
+                print("[FLOW-DEBUG] [WARN] Agent node executed but NO PAGES found in data!")
+            
+            result = node_agent(node_config, pages_text, debug=debug)
+            
             if current_type and isinstance(result, dict):
                 data[current_type] = data[current_type] | result
+            elif isinstance(result, dict):
+                 data.update(result)
+
         case "agent-group":
-            result = node_agent_group(node_config, data.get("pages", [])[0], debug=debug)
+            pages_text = data.get("pages", [])
+            result = node_agent_group(node_config, pages_text, debug=debug)
+            
             if current_type:
                 if isinstance(result, dict):
                     data[current_type] = data[current_type] | result
                 elif isinstance(result, list):
                     k = list(result[0].keys())[0]
-                    data[current_type][k] = {}
+                    if k not in data[current_type]: data[current_type][k] = {}
                     for r in result[1:]:
-                        data[current_type][k] = data[current_type][k] | r
+                        if isinstance(r, dict): data[current_type][k].update(r)
         case _:
-            print_debug(f"[WARN] Unknown type: {node_type}", debug)
+            print(f"[FLOW-DEBUG] [WARN] Unknown node type encountered: {node_type}")
 
     if not node_outputs:
         node_outputs, o2i = process_outputs(node)
 
     if o2i and len(o2i) > 0:
+        print(f"[FLOW-DEBUG] Ignoring downstream nodes: {o2i}")
         ignored_node(flow, o2i, nid)
 
     end = time.time()
-    print_debug(f"[INFO] Finished processing type: {node_type} in {end - start:.2f}s", debug)
+    print(f"[FLOW-DEBUG] END Processing Node: {node_type} (Duration: {end - start:.2f}s)")
 
     return node_outputs, node_result
 
 def process_node(flow, node, *, id=None, debug=False, data=None):
-    if data is None:
-        data = {}
+    if data is None: data = {}
 
     parents = node.get("inputs", []) or []
+    
+    if parents:
+        print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) waiting for parents: {parents}")
+
     while parents:
         ignored_by = set(node.get("ignored_by") or [])
         needed_parents = [p for p in parents if p not in ignored_by]
-        if all(flow[p].get("status") == "processed" for p in needed_parents):
-            break
-        time.sleep(.05)
+        
+        # Branche morte
+        if not needed_parents and parents:
+             print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) is in an ignored branch. Stopping.")
+             return data
 
-    node["status"] = "processing"
+        # Si tous les parents nécessaires sont "processed", on avance
+        if all(flow[p].get("status") == "processed" for p in needed_parents):
+            print(f"[FLOW-DEBUG] All parents processed for node {node.get('type')} ({id}). Proceeding.")
+            break
+        
+        time.sleep(0.05)
+
+    # --- FIX MERGE : VERROUILLAGE ---
+    # On utilise un verrou par nœud pour s'assurer qu'un seul thread parent déclenche l'exécution
+    lock = _get_node_lock(id)
+    with lock:
+        if node.get("status") in ["processing", "processed"]:
+            print(f"[FLOW-DEBUG] Node {node.get('type')} ({id}) already processed/processing. Skipping duplicate execution.")
+            return data
+        
+        node["status"] = "processing"
+
+    # Exécution du nœud
     nos, data = process_type(flow, node, nid=id, debug=debug, data=data)
+    
+    # Marquer comme terminé
     node["status"] = "processed"
 
+    # Lancement des enfants en parallèle
     threads = []
     for no in nos:
+        print(f"[FLOW-DEBUG] Spawning thread for next node: {no}")
         t = threading.Thread(target=process_node, args=(flow, flow[no]), kwargs={"id": no, "debug": debug, "data": data})
         threads.append(t)
         t.start()
 
+    # On attend la fin des branches enfants
     for t in threads:
         t.join()
 
@@ -573,8 +704,7 @@ def get_all_outputs(flow, id):
 def get_inputs_len(flow, id):
     node = find_node_by_id(flow, id)
     if node:
-        inputs = node.get("inputs", [])
-        return len(inputs)
+        return len(node.get("inputs", []))
     return 0
 
 def run(flow, *, base64=None, debug=False):
@@ -582,18 +712,28 @@ def run(flow, *, base64=None, debug=False):
         return f"{s[:max_len]}..." if len(s) > max_len else s
 
     start = time.time()
+    
+    # Reset status
+    for n in flow.values(): n["status"] = "pending"
+    
     start_node = find_start_node(flow)
-
     if not start_node:
-        print("No start node found")
-        return
+        print("[FLOW-ERROR] No start node found")
+        return {}
     
     flow['base64'] = base64
+    start_node_id = next((k for k, v in flow.items() if v.get("type") == "start"), None)
 
-    results = process_node(flow, start_node, debug=debug)
+    print(f"[FLOW-DEBUG] Flow Run Started. Start Node ID: {start_node_id}")
+
+    results = process_node(flow, start_node, id=start_node_id, debug=debug)
+
+    # Nettoyage des objets non-sérialisables (PIL images)
+    if results:
+        results.pop("_pil_images", None)
 
     end = time.time()
-    print_debug(f"[INFO] Flow executed in {end - start:.2f}s", debug)
+    print(f"[FLOW-DEBUG] Flow execution finished in {end - start:.2f}s")
 
     flow_pages = results.get("pages", [])
     for i in range(len(flow_pages)):
@@ -605,177 +745,84 @@ def run(flow, *, base64=None, debug=False):
     print_debug(f"[INFO] Final results: {results}", debug)
     return results
 
-flow = {
-    "001": {
-        "type": "start",
-        "outputs": { "base": ["002"] },
-        "inputs": []
-    },
-    "002": {
-        "type": "sardine",
-        "config": {
-            "accepted_files": ["facture"],
-            "result_sardine": "..."
-        },
-        "outputs": { "valid": ["003", "004", "005", "006", "007", "008", "009", "010", "011"], "invalid": ["400"] },
-        "inputs": ["001"]
-    },
+# ============ Transformations ============
+def transform_graph(data: dict) -> dict:
+    raw_nodes = data.get("nodes", [])
+    raw_links = data.get("links", [])
 
-    "003": {
-        "type": "agent-group",
-        "config": {
-            "agents": [
-                {
-                    "model": "addressto",
-                    "version": "1.13",
-                },
-                {
-                    "model": "address",
-                    "version": "2.1",
-                }
-            ],
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["002"]
-    },
-    "004": {
-        "type": "agent-group",
-        "config": {
-            "agents": [
-                {
-                    "model": "addressfrom",
-                    "version": "1.12",
-                },
-                {
-                    "model": "address",
-                    "version": "2.1",
-                }
-            ],
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["002"]
-    },
-    "005": {
-        "type": "agent-group",
-        "config": {
-            "agents": [
-                {
-                    "model": "addressship",
-                    "version": "1.4"
-                },
-                {
-                    "model": "address",
-                    "version": "2.1",
-                }
-            ],
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["002"]
-    },
-    "006": {
-        "type": "agent",
-        "config": {
-            "model": "amounts",
-            "version": "1.1"
-        },
-        "outputs": { "base": ["011calcHT"] },
-        "inputs": ["002"]
-    },
-    "007": {
-        "type": "agent",
-        "config": {
-            "model": "vatsiren",
-            "version": "1.5",
-        },
-        "outputs": { "base": ["007bis"] },
-        "inputs": ["002"]
-    },
-    "007bis": {
-        "type": "edit",
-        "config": {
-            "key": "siren",
-            "value": "vat.number[4:15]"
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["007"]
-    },
-    "008": {
-        "type": "agent",
-        "config": {
-            "model": "invoicenumber",
-            "version": "2.3",
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["002"]
-    },
-    "009": {
-        "type": "agent",
-        "config": {
-            "model": "invoicecategory",
-            "version": "1.0",
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["002"]
-    },
-    "010": {
-        "type": "agent",
-        "config": {
-            "model": "invoicecurrency",
-            "version": "1.0",
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["002"]
-    },
-    "011": {
-        "type": "agent",
-        "config": {
-            "model": "lines",
-            "version": "1.0",
-            "type": "list"
-        },
-        "outputs": { "base": ["011calcHT"] },
-        "inputs": ["002"]
-    },
+    nodes_map = {n['id']: n for n in raw_nodes}
+    engine_flow = {}
 
-    "011calcHT": {
-        "type": "edit",
-        "config": {
-            "key": "amount.ht",
-            "value": "lines_ht(line)"
-        },
-        "outputs": { "base": ["011calcTVA"] },
-        "inputs": ["011", "006"]
-    },
-    "011calcTVA": {
-        "type": "edit",
-        "config": {
-            "key": "amount.tva",
-            "value": "lines_tva(line)"
-        },
-        "outputs": { "base": ["011calcTTC"] },
-        "inputs": ["011calcHT"]
-    },
-    "011calcTTC": {
-        "type": "edit",
-        "config": {
-            "key": "amount.ttc",
-            "value": "lines_ttc(line)"
-        },
-        "outputs": { "base": ["200"] },
-        "inputs": ["011calcTVA"]
-    },
-    
-    "400": {
-        "type": "end",
-        "outputs": { "base": [] },
-        "inputs": ["002"]
-    },
-    "200": {
-        "type": "end",
-        "outputs": { "base": [] },
-        "inputs": ["003", "004", "005", "007bis", "008", "009", "010", "011calcTTC"]
-    }
-}
+    for nid, n in nodes_map.items():
+        node_type = n.get("type", "unknown")
+        config = n.get("config", {}).copy()
+        
+        if node_type == "sardine":
+            if "documentTypes" in config:
+                config["accepted_files"] = config["documentTypes"]
+        
+        elif node_type == "agent":
+            if "agentName" in config:
+                config["model"] = config["agentName"]
+        
+        elif node_type == "agent-group":
+            child_ids = config.get("ids", [])
+            agents_list = []
+            for child_id in child_ids:
+                child_node = nodes_map.get(child_id)
+                if child_node:
+                    child_cfg = child_node.get("config", {})
+                    agents_list.append({
+                        "model": child_cfg.get("agentName", ""),
+                        "version": child_cfg.get("version", "")
+                    })
+            config["agents"] = agents_list
+
+        engine_flow[nid] = {
+            "type": node_type,
+            "config": config,
+            "outputs": {},
+            "inputs": [],
+            "status": "pending"
+        }
+
+    for link in raw_links:
+        src_id = link['src']['nodeId']
+        dst_id = link['dst']['nodeId']
+        
+        if src_id not in engine_flow or dst_id not in engine_flow:
+            continue
+
+        if src_id not in engine_flow[dst_id]["inputs"]:
+            engine_flow[dst_id]["inputs"].append(src_id)
+
+        src_raw = nodes_map[src_id]
+        port_index = link['src'].get('portIndex', 0)
+        output_name = "base"
+
+        # 1. Priorité au nom défini dans le nœud (dynamique)
+        if "outputs" in src_raw and isinstance(src_raw["outputs"], list):
+            if port_index < len(src_raw["outputs"]):
+                p_name = src_raw["outputs"][port_index].get("name")
+                if p_name:
+                    output_name = p_name
+        
+        # 2. Fallbacks statiques si pas de nom explicite
+        src_type = src_raw.get("type")
+        if output_name == "base": 
+            if src_type == "sardine":
+                output_name = "valide" if port_index == 0 else "invalid"
+            elif src_type == "if":
+                output_name = "true" if port_index == 0 else "false"
+            elif src_type == "zone-detection":
+                output_name = "base"
+
+        if output_name not in engine_flow[src_id]["outputs"]:
+            engine_flow[src_id]["outputs"][output_name] = []
+        
+        engine_flow[src_id]["outputs"][output_name].append(dst_id)
+
+    return engine_flow
 
 if __name__ == "__main__":
-    run(flow, debug=True)
+    pass

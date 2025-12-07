@@ -1,7 +1,6 @@
 import os
 import re
 import threading
-from bson import ObjectId
 from functools import lru_cache
 from typing import Dict, Any, Iterable, List, Mapping
 
@@ -13,156 +12,144 @@ from transformers import (
     Pipeline,
 )
 
-from src.helpers import utils  # on garde utils pour _pyify (et autres utilitaires éventuels)
-# from your_module import best_entities  # <-- décommentez si vous l’avez ailleurs
+from src.helpers import utils
 
 _MODEL_LOAD_LOCK = threading.Lock()
 
 # ---------- DB ----------
 def get_db():
-    """
-    Retourne l'instance de base Mongo à partir des variables d'environnement :
-    - MONGO_URI (ex: mongodb://localhost:27017)
-    - MONGO_DB  (ex: my_database)
-    """
     mongo_uri = os.getenv("MONGO_URI")
     if not mongo_uri:
-        raise RuntimeError("MONGO_URI est manquant dans l'environnement.")
-
-    client = MongoClient(mongo_uri)
-
+        print("[WARN] MONGO_URI manquant.")
+        return None
     try:
+        client = MongoClient(mongo_uri)
         return client.get_default_database()
     except Exception:
         return None
 
 db = get_db()
 
+# ---------- CONFIG CACHE ----------
+@lru_cache(maxsize=32)
+def _get_agent_config(reference: str, version: str) -> dict | None:
+    if db is None: return None
+    if version == "latest":
+        cursor = db["agents"].find({"reference": reference}).sort("version", -1).limit(1)
+        lst = list(cursor)
+        if lst:
+            print(f"[INFO] 'latest' resolved to v{lst[0].get('version')} for agent {reference}")
+            return lst[0]
+    else:
+        return db["agents"].find_one({"reference": reference, "version": version})
+    return None
+
 # ---------- NLP ----------
 @lru_cache(maxsize=32)
 def get_token_classifier(model_dir: str) -> Pipeline:
-    """
-    Charge un pipeline token-classification en CPU, en évitant le device 'meta'.
-    """
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(f"Répertoire modèle introuvable : {model_dir}")
 
     with _MODEL_LOAD_LOCK:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            use_fast=True,
-        )
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, use_fast=True)
         model = AutoModelForTokenClassification.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            low_cpu_mem_usage=False,  # <-- force des tenseurs réels (pas 'meta')
-            device_map=None,          # <-- évite accelerate/'auto' qui place sur 'meta'
-            trust_remote_code=False,  # mets True si ton modèle custom le requiert
+            model_dir, local_files_only=True, low_cpu_mem_usage=False, device_map=None
         )
 
-    return pipeline(
-        task="token-classification",
-        model=model,
-        tokenizer=tokenizer,
-        aggregation_strategy="simple",
-        device=-1,  # CPU
-    )
+    return pipeline("token-classification", model=model, tokenizer=tokenizer, aggregation_strategy="simple", device=-1)
 
 # ---------- Utils ----------
 def clean_text(text: str) -> str:
-    # Remplace \r/\n par espaces et compacte les espaces multiples
-    text = text.replace("\r", " ").replace("\n", " ")
-    # text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return text.replace("\r", " ").replace("\n", " ").strip()
 
 # ---------- Public API ----------
 def run(text: str, *, reference: str, version: str):
-    """
-    Exécute l'agent NER pour (reference, version) :
-    - récupère la config 'agent' en base (optionnel, mais utile pour vérifier l'existence)
-    - charge le pipeline depuis le répertoire sardine.trainer/sardine.agents/{reference}/{version}
-    - nettoie le texte, passe le NER, puis _pyify le résultat
-    - applique best_entities si disponible, sinon renvoie les entités telles quelles
-    """
-    # 1) Vérifier que l'agent existe (si vous stockez la config en base)
-    agent = db["agents"].find_one({"reference": reference, "version": version})
-    if not agent:
-        print(f"[WARN] Agent introuvable : {reference} v{version}")
+    agent = _get_agent_config(reference, version)
+    
+    # Détermination du chemin
+    if agent and agent.get("path"):
+        model_dir = agent["path"]
+    else:
+        # Fallback relatif
+        real_ver = agent.get("version", version) if agent else version
+        model_dir = os.path.normpath(os.path.join("..", f"sardine.agents/{reference}/{real_ver}"))
 
-    # 2) Construire le chemin modèle
-    path = f"sardine.agents/{reference}/{version}"
-    model_dir = os.path.normpath(os.path.join("..", path))
+    # Chargement
+    try:
+        nlp = get_token_classifier(model_dir)
+    except Exception as e:
+        print(f"[ERROR] Erreur modèle {reference}: {e}")
+        return {}, {}
 
-    # 3) Charger le pipeline (caché)
-    nlp = get_token_classifier(model_dir)
-
-    # 4) NER
     text_clean = clean_text(text)
-    raw_entities = nlp(text_clean)
+    if not text_clean: return {}, {}
+
+    try:
+        raw_entities = nlp(text_clean)
+    except Exception as e:
+        print(f"[ERROR] Erreur inférence {reference}: {e}")
+        return {}, {}
+
     mapper = agent.get("mapper", {}) if agent else {}
-
-    # 5) Post-traitements
     entities = utils._pyify(raw_entities)
-
+    
+    valid_entities = []
     for ent in entities:
-        start, end = ent.get("start"), ent.get("end")
-        ent["word"] = text_clean[start:end]
-        if ent["score"] < .8:
-            entities.remove(ent) 
+        if ent.get("score", 0) >= 0.75: # Seuil légèrement baissé par sécurité
+            start, end = ent.get("start"), ent.get("end")
+            ent["word"] = text_clean[start:end]
+            valid_entities.append(ent)
 
-    # 6) Agrégation "best"
-    return best_entities(entities, reqs=agent.get("requirements", [])) if agent else entities, mapper
+    print(f"[INFO] {len(valid_entities)} entités extraites par {reference} v{version}")
 
-def best_entities(entities: List[Dict[str, Any]], reqs: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
-    """
-    Exemple de fonction d'agrégation des entités.
-    Vous pouvez la modifier ou la remplacer par votre propre logique.
-    Ici, on garde pour chaque type d'entité la plus longue (en caractères).
-    """
+    reqs = agent.get("requirements", []) if agent else []
+    return best_entities(valid_entities, reqs), mapper
+
+def best_entities(entities: List[Dict[str, Any]], reqs: Any) -> Dict[str, Any]:
     best = {}
+    requirements_map = reqs if isinstance(reqs, dict) else {}
 
     for ent in entities:
-        label, score, word = ent.get("entity_group"), ent.get("score", 0), ent.get("word", "")
-        respect, value = check_requirements(word, reqs[label])
-        if (label not in best or best[label]["score"] < score) and respect:
-            ent["word"] = value
-            best[label] = ent
-
+        label = ent.get("entity_group")
+        score = ent.get("score", 0)
+        word = ent.get("word", "")
+        
+        specific_reqs = requirements_map.get(label, []) if requirements_map else []
+        respect, value = check_requirements(word, specific_reqs)
+        
+        if respect:
+            if label not in best or score > best[label]["score"]:
+                ent["word"] = value
+                best[label] = ent
     return best
 
 def check_requirements(value: Any, requirements: Iterable[Mapping[str, Any]]) -> bool:
-    for requirement in requirements or []:
-        rule = requirement.get("rule", "")
-        constraint = requirement.get("constraint", "")
-
-        if rule == "regex":
-            match = re.search(str(constraint), str(value))
-            if match:
-                value = match.group(0)
-
+    if not requirements: return True, value
+    str_val = str(value)
+    
+    for r in requirements:
+        rule = r.get("rule")
+        constraint = r.get("constraint")
         try:
-            if rule == "regex" and not re.match(str(constraint), str(value)):
+            if rule == "regex":
+                if not re.search(str(constraint), str_val):
+                    return False, value
+            elif rule == "eq" and str_val != str(constraint):
                 return False, value
-            elif rule == "eq" and str(value) != str(constraint):
+            elif rule == "neq" and str_val == str(constraint):
                 return False, value
-            elif rule == "neq" and str(value) == str(constraint):
+            elif rule in ["gt", "lt", "gte", "lte"]:
+                f_val = float(value)
+                f_const = float(constraint)
+                if rule == "gt" and f_val <= f_const: return False, value
+                if rule == "lt" and f_val >= f_const: return False, value
+                if rule == "gte" and f_val < f_const: return False, value
+                if rule == "lte" and f_val > f_const: return False, value
+            elif rule == "in" and str_val not in split_constraint(constraint):
                 return False, value
-            elif rule == "gt" and float(value) <= float(constraint):
+            elif rule == "nin" and str_val in split_constraint(constraint):
                 return False, value
-            elif rule == "lt" and float(value) >= float(constraint):
-                return False, value
-            elif rule == "gte" and float(value) < float(constraint):
-                return False, value
-            elif rule == "lte" and float(value) > float(constraint):
-                return False, value
-            elif rule == "in" and str(value) not in split_constraint(constraint):
-                return False, value
-            elif rule == "nin" and str(value) in split_constraint(constraint):
-                return False, value
-            elif rule == "contains" and str(constraint) not in str(value):
-                return False, value
-            elif rule == "ncontains" and str(constraint) in str(value):
+            elif rule == "len" and len(str_val) != int(constraint):
                 return False, value
         except Exception:
             return False, value

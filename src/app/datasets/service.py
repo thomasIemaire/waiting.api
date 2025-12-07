@@ -36,7 +36,10 @@ class DatasetsService(BaseService):
             return []
 
         sample_size = max(int(size or 10), 1)
-        ddselected = random.choices(dataset_data, k=sample_size)
+        # On s'assure de ne pas demander plus d'échantillons qu'il n'y a de données
+        real_sample_size = min(sample_size, len(dataset_data))
+        ddselected = random.choices(dataset_data, k=real_sample_size)
+        
         entities = model.get("entities", []) if model else []
 
         examples = []
@@ -45,16 +48,26 @@ class DatasetsService(BaseService):
             text = data.get("text", "")
 
             example_entities = []
+            # Déballage des valeurs start, end, key/k
             for s, e, k in data.get("entities", []):
-                if 0 <= k < len(entities):
-                    key = entities[k]
-                else:
-                    continue
-                example_entities.append({
-                    "start": s,
-                    "end": e,
-                    "key": key
-                })
+                key = None
+                
+                # CORRECTION ICI : Gestion du type de k
+                if isinstance(k, int):
+                    # Cas où k est un index pointant vers la liste 'entities' du modèle
+                    if 0 <= k < len(entities):
+                        key = entities[k]
+                elif isinstance(k, str):
+                    # Cas où k est déjà le label (comme vu dans ton image JSON)
+                    key = k
+                
+                # Si on a trouvé une clé valide, on l'ajoute
+                if key:
+                    example_entities.append({
+                        "start": s,
+                        "end": e,
+                        "key": key
+                    })
             
             examples.append({
                 "text": text,
@@ -84,6 +97,7 @@ class DatasetsService(BaseService):
             raise ValueError("Document not found")
         
         self.dao.delete_one({"_id": ObjectId(id)})
+        self.dao.db["datasets_data"].delete_many({"dataset": ObjectId(id)})
 
     def train_dataset(self, dataset_id: str, user_id: str, parameters: dict):
         self.get_document(id=dataset_id)
@@ -96,7 +110,7 @@ class DatasetsService(BaseService):
 
         self.dao.update_one(
             {"_id": ObjectId(dataset_id)},
-            {"parameters": parameters, "trained_by": user, "status": "ready_to_train"}
+            {"parameters": parameters, "trained_by": user, "status": "to-train"}
         )
 
         return {"message": "Dataset is ready to be trained."}

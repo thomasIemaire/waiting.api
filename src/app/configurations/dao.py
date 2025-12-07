@@ -7,6 +7,11 @@ class ConfigurationsDao(BaseDao):
     def find_all(self, *, sort: str = "created_at") -> list[dict]:
         return self.find(
             sort=[(sort, -1)],
-            projection={"attributes": 0, "formats": 0, "randomizers": 0},
+            # Exclure le nouveau champ de la liste globale pour alléger
+            projection={
+                "attributes": 0, 
+                "formats": 0, 
+                "randomizers": 0,
+                "negative_configurations": 0
+            },
         )
-

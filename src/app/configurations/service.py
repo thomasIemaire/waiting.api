@@ -24,6 +24,13 @@ class ConfigurationsService(BaseService):
     def get_configuration(self, *, config_id: str) -> Dict[str, Any]:
         config = self.get_document(id=config_id)
         
+        # --- NOUVEAU : Conversion des ObjectIds en strings pour le frontend ---
+        if "negative_configurations" in config:
+            config["negative_configurations"] = [
+                str(nc_id) for nc_id in config["negative_configurations"]
+            ]
+        # ----------------------------------------------------------------------
+
         # On parcourt les attributs pour enrichir les références
         for attr in config.get("attributes", []):
             value = attr.get("value", {})
@@ -65,9 +72,13 @@ class ConfigurationsService(BaseService):
         doc: Dict[str, Any] = {
             "name": data.get("name"),
             "description": data.get("description", ""),
+            "constants": data.get("constants", {}),
             "attributes": data.get("attributes", []),
             "formats": data.get("formats", []),
             "randomizers": data.get("randomizers", []),
+            "negative_configurations": [
+                ObjectId(i) for i in data.get("negative_configurations", []) if i
+            ],
             "created_at": utils.get_current_time(),
             "possibilities": self.calculate_max_configuration_possibilities(data),
         }
@@ -84,15 +95,16 @@ class ConfigurationsService(BaseService):
         update_fields = {
             "name": data.get("name"),
             "description": data.get("description", ""),
+            "constants": data.get("constants", {}),
             "attributes": data.get("attributes", []),
             "formats": data.get("formats", []),
             "randomizers": data.get("randomizers", []),
-            # Recalculer les possibilités lors de la mise à jour
+            "negative_configurations": [
+                ObjectId(i) for i in data.get("negative_configurations", []) if i
+            ],
             "possibilities": self.calculate_max_configuration_possibilities(data),
         }
         
-        # On nettoie les champs None ou vides si nécessaire, ou on remplace tout.
-        # Ici on utilise update_one avec $set
         self.dao.update_one({"_id": ObjectId(config_id)}, update_fields)
         
         return self.get_configuration(config_id=config_id)
@@ -143,4 +155,3 @@ class ConfigurationsService(BaseService):
                 return self.calculate_max_configuration_possibilities(configuration)
             case _:
                 return 1
-
