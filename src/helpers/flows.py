@@ -185,6 +185,12 @@ def node_agent(config, text, *, debug=False):
     model = config.get("model", "")
     version = config.get("version", "")
     type = config.get("type", "single")
+    processing_mode = config.get("processing_mode", "per_zone")
+    max_zones_raw = config.get("max_zones")
+    try:
+        max_zones = int(max_zones_raw) if max_zones_raw is not None else None
+    except (TypeError, ValueError):
+        max_zones = None
 
     print(f"[FLOW-DEBUG] >>> Node Agent '{model}' (v{version}) STARTED")
 
@@ -214,6 +220,17 @@ def node_agent(config, text, *, debug=False):
             processed_text_list.append(" ".join(t.get("header", [])))
         else:
             processed_text_list.append(str(t))
+
+    # Option de limitation du nombre de zones à traiter
+    if isinstance(max_zones, int) and max_zones > 0:
+        processed_text_list = processed_text_list[:max_zones]
+        print(f"[FLOW-DEBUG] [AGENT] Limiting processing to first {max_zones} zones.")
+
+    # Option pour traiter tout le texte en une seule fois
+    if str(processing_mode).lower() == "all_at_once":
+        combined_text = "\n\n".join(processed_text_list)
+        processed_text_list = [combined_text]
+        print(f"[FLOW-DEBUG] [AGENT] Processing all text at once. Combined length: {len(combined_text)}")
 
     # --- AGREGATION ---
     # On parcourt TOUTES les zones et on garde le meilleur résultat pour chaque champ
