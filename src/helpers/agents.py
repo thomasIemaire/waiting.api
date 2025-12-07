@@ -95,15 +95,17 @@ def run(text: str, *, reference: str, version: str):
     
     valid_entities = []
     for ent in entities:
-        if ent.get("score", 0) >= 0.75: # Seuil légèrement baissé par sécurité
+        if ent.get("score", 0) >= 0.5: # Seuil légèrement baissé par sécurité
             start, end = ent.get("start"), ent.get("end")
             ent["word"] = text_clean[start:end]
             valid_entities.append(ent)
 
-    print(f"[INFO] {len(valid_entities)} entités extraites par {reference} v{version}")
-
     reqs = agent.get("requirements", []) if agent else []
-    return best_entities(valid_entities, reqs), mapper
+    best_entities_result = best_entities(valid_entities, reqs)
+
+    print(f"[INFO] Agent '{reference}' v{version} extrait {len(best_entities_result)} entité(ies) pertinente(s).")
+
+    return best_entities_result, mapper
 
 def best_entities(entities: List[Dict[str, Any]], reqs: Any) -> Dict[str, Any]:
     best = {}
