@@ -42,6 +42,16 @@ def create_flows_router(db: Database) -> Blueprint:
         except ValueError:
             return json_error("Not found", 404)
         return jsonify(updated), 200
+    
+    @bp.post("/<id>/default")
+    @jwt_required()
+    def set_default_flow(id):
+        print( "---- FLOW CONTROLLER: SET DEFAULT FLOW ----" )
+        try:
+            service.set_default(flow_id=id)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"status": "updated"}), 200
 
     @bp.get("/<id>")
     @jwt_required()
