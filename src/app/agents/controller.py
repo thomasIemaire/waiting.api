@@ -9,7 +9,7 @@ def create_agents_router(db: Database) -> Blueprint:
     bp = Blueprint("agents", __name__)
     service = AgentsService(db)
 
-    @bp.get("")
+    @bp.get("/")
     @jwt_required()
     def find_agents():
         docs = service.find_all()
