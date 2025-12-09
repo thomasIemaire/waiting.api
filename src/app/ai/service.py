@@ -62,7 +62,7 @@ class AiService(BaseService):
         # --- FIN MODIFICATIONS ---
 
         type = result.get("type", "unknown")
-        analysis = result.get(type, {})
+        analysis = result.get("analysis", {})
 
         document["type"] = type
         document["analysis"] = analysis
