@@ -2,6 +2,7 @@ from platform import node
 import threading, time, re, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import src
 from src.app import data
 from src.helpers.agents import run as run_agent
 # On importe les fonctions séparées depuis le nouveau sardine.py
@@ -328,12 +329,30 @@ _template_var_re = re.compile(r'\{\{([A-Za-z0-9_.]+)\}\}')
 def _get_by_path_any(d, path):
     return get_by_path(d, path)
 
+def smart_get(data, path):
+    """Cherche une valeur à la racine, dans 'analysis', ou dans le sous-objet typé"""
+    # 1. Recherche exacte (ex: "facture.vat.number")
+    val = get_by_path(data, path)
+    if val is not None: return val
+
+    # 2. Recherche dans 'analysis' (ex: "vat.number" -> "analysis.vat.number")
+    val = get_by_path(data, f"analysis.{path}")
+    if val is not None: return val
+
+    # 3. Recherche dans le type de document (ex: "vat.number" -> "facture.vat.number")
+    doc_type = data.get("type")
+    if doc_type and isinstance(doc_type, str):
+        val = get_by_path(data, f"{doc_type}.{path}")
+        if val is not None: return val
+    
+    return None
+
 def resolve_value(value, data):
     if isinstance(value, str):
         v = value.strip()
         full_match = _template_var_re.fullmatch(v)
         if full_match:
-            return get_by_path(data, full_match.group(1))
+            return smart_get(data, full_match.group(1))
         
         if "{{" in v:
             def replace_var(m):
@@ -359,8 +378,9 @@ def resolve_value(value, data):
         m = _slice_re.match(v)
         if m:
             path, s, e = m.group(1), m.group(2), m.group(3)
-            src = get_by_path(data, path)
+            src = smart_get(data, path)
             if isinstance(src, (str, bytes)):
+                # Gestion sécurisée des index vides (ex: [-9:] ou [:5])
                 s_idx = int(s) if s not in (None, "") else None
                 e_idx = int(e) if e not in (None, "") else None
                 return src[s_idx:e_idx]
@@ -621,7 +641,7 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
                 data["analysis"] = data["analysis"] | result
             elif isinstance(result, list):
                 pass
-            
+
         case _:
             print(f"[FLOW-DEBUG] [WARN] Unknown node type encountered: {node_type}")
 
