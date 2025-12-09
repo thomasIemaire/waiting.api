@@ -72,7 +72,7 @@ class ConfigurationsService(BaseService):
         doc: Dict[str, Any] = {
             "name": data.get("name"),
             "description": data.get("description", ""),
-            "constants": data.get("constants", {}),
+            "constants": data.get("constants", []),
             "attributes": data.get("attributes", []),
             "formats": data.get("formats", []),
             "randomizers": data.get("randomizers", []),
@@ -95,7 +95,7 @@ class ConfigurationsService(BaseService):
         update_fields = {
             "name": data.get("name"),
             "description": data.get("description", ""),
-            "constants": data.get("constants", {}),
+            "constants": data.get("constants", []),
             "attributes": data.get("attributes", []),
             "formats": data.get("formats", []),
             "randomizers": data.get("randomizers", []),
