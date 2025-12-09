@@ -48,25 +48,14 @@ def _parse_money_fr(s) -> float:
     except ValueError:
         return 0.0
 
-def _parse_percent_fr(s) -> float:
-    v = _parse_money_fr(s)
-    return v/100.0 if v > 0 else 0.0
-
-def _iter_lines(line_dict: dict):
-    if not isinstance(line_dict, dict):
-        return
-    keys = ["label", "quantity", "unitprice", "totalprice", "tva", "reference"]
-    cols = {k: line_dict.get(k, []) for k in keys}
-    n = max((len(v) for v in cols.values() if isinstance(v, list)), default=0)
-    for i in range(n):
-        yield {
-            "label":      (cols["label"][i] if i < len(cols["label"]) else ""),
-            "quantity":   (cols["quantity"][i] if i < len(cols["quantity"]) else ""),
-            "unitprice":  (cols["unitprice"][i] if i < len(cols["unitprice"]) else ""),
-            "totalprice": (cols["totalprice"][i] if i < len(cols["totalprice"]) else ""),
-            "tva":        (cols["tva"][i] if i < len(cols["tva"]) else ""),
-            "reference":  (cols["reference"][i] if i < len(cols["reference"]) else ""),
-        }
+def deep_merge(target: dict, source: dict) -> dict:
+    """Fusionne récursivement source dans target sans écraser les sous-clés existantes."""
+    for key, value in source.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
 
 def _sum_list_money_fr(values) -> float:
     total = 0.0
@@ -628,7 +617,7 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
                 data["analysis"] = {}
 
             if isinstance(result, dict):
-                 data["analysis"] = data["analysis"] | result
+                deep_merge(data["analysis"], result)
 
         case "agent-group":
             pages_text = data.get("pages", [])
@@ -638,7 +627,7 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
                 data["analysis"] = {}
 
             if isinstance(result, dict):
-                data["analysis"] = data["analysis"] | result
+                deep_merge(data["analysis"], result)
             elif isinstance(result, list):
                 pass
 
