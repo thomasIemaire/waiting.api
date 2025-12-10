@@ -29,6 +29,7 @@ class FlowService(BaseService):
                 "name": doc.get("name"),
                 "description": doc.get("description", ""),
                 "created_at": doc.get("created_at"),
+                "default": doc.get("default", False), # Ajout du champ default
                 # MOCK: Données utilisateur en dur comme demandé
                 "created_by": {
                     "id": str(doc.get("created_by", "6900ca440de85ad6173e53f7")), 
@@ -53,6 +54,7 @@ class FlowService(BaseService):
             "name": payload.get("name"),
             "description": payload.get("description", ""),
             "data": payload.get("data", {}), # Le JSON du graph (nodes/links)
+            "default": False,
             "created_at": utils.get_current_time(),
         }
 
@@ -77,6 +79,22 @@ class FlowService(BaseService):
 
         self.dao.update_one({"_id": ObjectId(flow_id)}, update_fields)
         return self.get_flow(flow_id=flow_id)
+
+    def set_default(self, *, flow_id: str) -> None:
+        if not self.document_exists(id=flow_id):
+            raise ValueError("Document not found")
+        
+        # 1. On passe tous les flux à default=False
+        self.dao.col.update_many({}, {"$set": {"default": False}})
+        
+        # 2. On passe le flux ciblé à default=True
+        self.dao.update_one({"_id": ObjectId(flow_id)}, {"default": True})
+
+    def get_default_flow(self) -> dict:
+        doc = self.dao.find_one({"default": True})
+        if not doc:
+            raise ValueError("No default flow set")
+        return doc
 
     def delete_flow(self, *, flow_id: str) -> None:
         if not self.document_exists(id=flow_id):

@@ -94,6 +94,8 @@ def run(text: str, *, reference: str, version: str):
     print(f"[INFO] Agent '{reference}' v{version} - mapper: {mapper}")
 
     entities = utils._pyify(raw_entities)
+
+    print(f"[DEBUG] text_clean: {text_clean}")
     
     valid_entities = []
     for ent in entities:

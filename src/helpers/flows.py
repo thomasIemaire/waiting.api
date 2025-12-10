@@ -1,6 +1,9 @@
+from platform import node
 import threading, time, re, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import src
+from src.app import data
 from src.helpers.agents import run as run_agent
 # On importe les fonctions séparées depuis le nouveau sardine.py
 from src.helpers.sardine import load_images, predict_classification, predict_detection
@@ -45,38 +48,14 @@ def _parse_money_fr(s) -> float:
     except ValueError:
         return 0.0
 
-def _parse_percent_fr(s) -> float:
-    v = _parse_money_fr(s)
-    return v/100.0 if v > 0 else 0.0
-
-def _iter_lines(line_dict: dict):
-    if not isinstance(line_dict, dict):
-        return
-    keys = ["label", "quantity", "unitprice", "totalprice", "tva", "reference"]
-    cols = {k: line_dict.get(k, []) for k in keys}
-    n = max((len(v) for v in cols.values() if isinstance(v, list)), default=0)
-    for i in range(n):
-        yield {
-            "label":      (cols["label"][i] if i < len(cols["label"]) else ""),
-            "quantity":   (cols["quantity"][i] if i < len(cols["quantity"]) else ""),
-            "unitprice":  (cols["unitprice"][i] if i < len(cols["unitprice"]) else ""),
-            "totalprice": (cols["totalprice"][i] if i < len(cols["totalprice"]) else ""),
-            "tva":        (cols["tva"][i] if i < len(cols["tva"]) else ""),
-            "reference":  (cols["reference"][i] if i < len(cols["reference"]) else ""),
-        }
-
-def _amounts_from_lines(line_dict: dict) -> dict:
-    total_ht = total_tva = 0.0
-    for row in _iter_lines(line_dict):
-        q  = _parse_money_fr(row["quantity"])
-        pu = _parse_money_fr(row["unitprice"])
-        tp = _parse_money_fr(row["totalprice"])
-        rate = _parse_percent_fr(row["tva"])
-        ht_line = tp if tp > 0 else (q * pu if q > 0 and pu > 0 else 0.0)
-        tva_line = ht_line * rate
-        total_ht  += ht_line
-        total_tva += tva_line
-    return {"ht": total_ht, "tva": total_tva, "ttc": total_ht + total_tva}
+def deep_merge(target: dict, source: dict) -> dict:
+    """Fusionne récursivement source dans target sans écraser les sous-clés existantes."""
+    for key, value in source.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
 
 def _sum_list_money_fr(values) -> float:
     total = 0.0
@@ -87,35 +66,6 @@ def _sum_list_money_fr(values) -> float:
     for v in values:
         total += _parse_money_fr(v)
     return total
-
-def _text_from_pages(data) -> str:
-    pages = data.get("pages", [])
-    chunks = []
-
-    def walk(x):
-        if isinstance(x, str):
-            chunks.append(x)
-        elif isinstance(x, list):
-            for e in x:
-                walk(e)
-        elif isinstance(x, dict):
-            if x.get("type") == "table":
-                hdr = x.get("header", [])
-                cols = x.get("columns", [])
-                for h in hdr: 
-                    if isinstance(h, str): chunks.append(h)
-                for col in cols:
-                    if isinstance(col, list):
-                        for cell in col:
-                            if isinstance(cell, str):
-                                chunks.append(cell)
-            else:
-                for v in x.values():
-                    walk(v)
-
-    walk(pages)
-    return "\n".join(chunks)
-
 
 # ============ Node Actions ============
 
@@ -185,6 +135,12 @@ def node_agent(config, text, *, debug=False):
     model = config.get("model", "")
     version = config.get("version", "")
     type = config.get("type", "single")
+    processing_mode = config.get("processing_mode", "per_zone")
+    max_zones_raw = config.get("max_zones")
+    try:
+        max_zones = int(max_zones_raw) if max_zones_raw is not None else None
+    except (TypeError, ValueError):
+        max_zones = None
 
     print(f"[FLOW-DEBUG] >>> Node Agent '{model}' (v{version}) STARTED")
 
@@ -214,6 +170,17 @@ def node_agent(config, text, *, debug=False):
             processed_text_list.append(" ".join(t.get("header", [])))
         else:
             processed_text_list.append(str(t))
+
+    # Option de limitation du nombre de zones à traiter
+    if isinstance(max_zones, int) and max_zones > 0:
+        processed_text_list = processed_text_list[:max_zones]
+        print(f"[FLOW-DEBUG] [AGENT] Limiting processing to first {max_zones} zones.")
+
+    # Option pour traiter tout le texte en une seule fois
+    if str(processing_mode).lower() == "all_at_once":
+        combined_text = "\n\n".join(processed_text_list)
+        processed_text_list = [combined_text]
+        print(f"[FLOW-DEBUG] [AGENT] Processing all text at once. Combined length: {len(combined_text)}")
 
     # --- AGREGATION ---
     # On parcourt TOUTES les zones et on garde le meilleur résultat pour chaque champ
@@ -346,21 +313,35 @@ def set_by_path(d, path, value):
 _slice_re = re.compile(r'^([A-Za-z0-9_.]+)(?:\[(\-?\d*):(\-?\d*)\])?$')
 _expr_sum   = re.compile(r'^sum\(([^)]+)\)$')
 _expr_calc  = re.compile(r'^calc_ttc\(\s*([A-Za-z0-9_.]+)\s*,\s*([A-Za-z0-9_.]+)\s*\)$')
-_expr_lines_ht  = re.compile(r'^lines_ht\(\s*([A-Za-z0-9_.]+)\s*\)$')
-_expr_lines_tva = re.compile(r'^lines_tva\(\s*([A-Za-z0-9_.]+)\s*\)$')
-_expr_lines_ttc = re.compile(r'^lines_ttc\(\s*([A-Za-z0-9_.]+)\s*\)$')
-_expr_lines_all = re.compile(r'^lines_amounts\(\s*([A-Za-z0-9_.]+)\s*\)$')
 _template_var_re = re.compile(r'\{\{([A-Za-z0-9_.]+)\}\}')
 
 def _get_by_path_any(d, path):
     return get_by_path(d, path)
+
+def smart_get(data, path):
+    """Cherche une valeur à la racine, dans 'analysis', ou dans le sous-objet typé"""
+    # 1. Recherche exacte (ex: "facture.vat.number")
+    val = get_by_path(data, path)
+    if val is not None: return val
+
+    # 2. Recherche dans 'analysis' (ex: "vat.number" -> "analysis.vat.number")
+    val = get_by_path(data, f"analysis.{path}")
+    if val is not None: return val
+
+    # 3. Recherche dans le type de document (ex: "vat.number" -> "facture.vat.number")
+    doc_type = data.get("type")
+    if doc_type and isinstance(doc_type, str):
+        val = get_by_path(data, f"{doc_type}.{path}")
+        if val is not None: return val
+    
+    return None
 
 def resolve_value(value, data):
     if isinstance(value, str):
         v = value.strip()
         full_match = _template_var_re.fullmatch(v)
         if full_match:
-            return get_by_path(data, full_match.group(1))
+            return smart_get(data, full_match.group(1))
         
         if "{{" in v:
             def replace_var(m):
@@ -374,14 +355,6 @@ def resolve_value(value, data):
                     pass
             return v
 
-        m = _expr_lines_all.match(v)
-        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))
-        m = _expr_lines_ht.match(v)
-        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))["ht"]
-        m = _expr_lines_tva.match(v)
-        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))["tva"]
-        m = _expr_lines_ttc.match(v)
-        if m: return _amounts_from_lines(_get_by_path_any(data, m.group(1)))["ttc"]
         m = _expr_sum.match(v)
         if m:
             arr = _get_by_path_any(data, m.group(1).strip())
@@ -394,8 +367,9 @@ def resolve_value(value, data):
         m = _slice_re.match(v)
         if m:
             path, s, e = m.group(1), m.group(2), m.group(3)
-            src = get_by_path(data, path)
+            src = smart_get(data, path)
             if isinstance(src, (str, bytes)):
+                # Gestion sécurisée des index vides (ex: [-9:] ou [:5])
                 s_idx = int(s) if s not in (None, "") else None
                 e_idx = int(e) if e not in (None, "") else None
                 return src[s_idx:e_idx]
@@ -407,6 +381,18 @@ def node_edit(config, data):
     raw_value = config.get("value")
     if not key: return data
     value = resolve_value(raw_value, data)
+
+    if "analysis" not in data:
+        data["analysis"] = {}
+
+    if get_by_path(data, f"analysis.{key}") is not None:
+            set_by_path(data, f"analysis.{key}", value)
+            return data
+    
+    if not key.startswith("analysis."):
+            set_by_path(data, f"analysis.{key}", value)
+            return data
+
     set_by_path(data, key, value)
     return data
 
@@ -440,6 +426,11 @@ def process_outputs(node, *, output_keys: list[str] = []):
     print(f"[FLOW-DEBUG] Valid Outputs: {o2v} | Ignored Outputs: {o2i}")
     return o2v, o2i
 
+def normalize_val(v):
+    """Convertit None en '' et force le string pour la comparaison"""
+    if v is None: return ""
+    return str(v)
+
 def process_type(flow, node, *, data={}, nid=None, debug=False):
     node_type = node.get("type")
     node_config = node.get("config", {})
@@ -462,52 +453,77 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
             matched_index = -1
             
             for i, cond in enumerate(conditions):
-                rules = cond.get("rules")
+                rules = cond.get("rules", [])
                 if not rules:
-                    rules = [{"left": cond.get("left"), "operator": cond.get("operator", "=="), "right": cond.get("right")}]
+                    # Fallback compatibilité
+                    rules = [{"left": cond.get("left"), "operator": cond.get("operator", "=="), "right": cond.get("right"), "link": "AND"}]
                 
-                logic = cond.get("logic", "AND")
-                results = []
+                # Évaluation séquentielle des règles
+                # On évalue la première règle
+                current_result = False
+                
+                # Helper pour évaluer une règle unique
+                def eval_rule(r):
+                    left_raw = resolve_value(r.get("left"), data)
+                    # Gestion du mode "valeur brute" ou "clé dynamique" pour la partie droite
+                    if r.get("rightIsKey") is True:
+                        right_raw = resolve_value(r.get("right"), data)
+                    else:
+                        # Si ce n'est pas une clé, c'est une valeur brute (déjà résolue ou string)
+                        right_raw = resolve_value(r.get("right"), data)
 
-                for rule in rules:
-                    left_val = resolve_value(rule.get("left"), data)
-                    right_val = resolve_value(rule.get("right"), data)
-                    op = rule.get("operator", "==")
+                    op = r.get("operator", "==")
                     
-                    res = False
+                    # Normalisation pour comparaison vide/null
+                    l_str, r_str = normalize_val(left_raw), normalize_val(right_raw)
+
                     try:
-                        try:
-                            l_num, r_num = float(left_val), float(right_val)
-                            is_num = True
-                        except (ValueError, TypeError):
-                            is_num = False
+                        # Tentative comparaison numérique
+                        l_num, r_num = float(left_raw), float(right_raw)
+                        is_num = True
+                    except (ValueError, TypeError):
+                        is_num = False
 
-                        if op == "==": res = (str(left_val) == str(right_val))
-                        elif op == "!=": res = (str(left_val) != str(right_val))
-                        elif op == "contains": res = (str(right_val) in str(left_val))
-                        elif is_num:
-                            if op == ">": res = (l_num > r_num)
-                            elif op == ">=": res = (l_num >= r_num)
-                            elif op == "<": res = (l_num < r_num)
-                            elif op == "<=": res = (l_num <= r_num)
-                        else:
-                            l_str, r_str = str(left_val), str(right_val)
-                            if op == ">": res = (l_str > r_str)
-                            elif op == ">=": res = (l_str >= r_str)
-                            elif op == "<": res = (l_str < r_str)
-                            elif op == "<=": res = (l_str <= r_str)
-                    except Exception as e:
-                        print(f"[IF NODE ERROR] {e}")
-                        res = False
-                    results.append(res)
+                    if op == "==": return l_str == r_str
+                    elif op == "!=": return l_str != r_str
+                    elif op == "contains": return r_str in l_str
+                    elif is_num:
+                        if op == ">": return l_num > r_num
+                        elif op == ">=": return l_num >= r_num
+                        elif op == "<": return l_num < r_num
+                        elif op == "<=": return l_num <= r_num
+                    else:
+                        # Comparaison alphabétique si pas numérique
+                        if op == ">": return l_str > r_str
+                        elif op == ">=": return l_str >= r_str
+                        elif op == "<": return l_str < r_str
+                        elif op == "<=": return l_str <= r_str
+                    return False
 
-                if (logic == "OR" and any(results)) or (logic == "AND" and all(results)):
+                # Initialisation avec la première règle
+                if len(rules) > 0:
+                    current_result = eval_rule(rules[0])
+
+                # Chaînage des règles suivantes
+                for k in range(1, len(rules)):
+                    prev_rule = rules[k-1]
+                    curr_rule = rules[k]
+                    logic_link = prev_rule.get("link", "AND") # Le lien est défini sur la règle PRÉCÉDENTE
+                    
+                    next_res = eval_rule(curr_rule)
+                    
+                    if logic_link == "OR":
+                        current_result = current_result or next_res
+                    else:
+                        current_result = current_result and next_res
+
+                if current_result:
                     matched_index = i
                     break
             
             if matched_index >= 0:
                 print(f"[FLOW-DEBUG] IF matched index: {matched_index}")
-                output_keys = [f"Case {matched_index+1}"]
+                # Logique de sortie inchangée
                 if len(node.get("outputs", {})) == 2 and "true" in node.get("outputs", {}):
                      node_outputs, o2i = process_outputs(node, output_keys=["true" if matched_index == 0 else "false"])
                 else:
@@ -564,11 +580,11 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
             node_outputs, o2i = process_outputs(node, output_keys=[output_state])
             
             data["type"] = doc_type
-            # On n'écrase pas les pages si déjà présentes (car Sardine ne fait que classification ici)
             if not data.get("pages"):
                 data["pages"] = pages 
-            if doc_type not in data:
-                data[doc_type] = {}
+
+            if "analysis" not in data:
+                data["analysis"] = {}
 
         case "zone-detection":
             print(f"[FLOW-DEBUG] Running Zone Detection node...")
@@ -585,8 +601,8 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
                 data["type"] = doc_type
             data["pages"] = pages
             
-            if data.get("type") and data["type"] not in data:
-                data[data["type"]] = {}
+            if "analysis" not in data:
+                data["analysis"] = {}
             
             node_outputs, o2i = process_outputs(node)
 
@@ -597,23 +613,24 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
             
             result = node_agent(node_config, pages_text, debug=debug)
             
-            if current_type and isinstance(result, dict):
-                data[current_type] = data[current_type] | result
-            elif isinstance(result, dict):
-                 data.update(result)
+            if "analysis" not in data:
+                data["analysis"] = {}
+
+            if isinstance(result, dict):
+                deep_merge(data["analysis"], result)
 
         case "agent-group":
             pages_text = data.get("pages", [])
             result = node_agent_group(node_config, pages_text, debug=debug)
             
-            if current_type:
-                if isinstance(result, dict):
-                    data[current_type] = data[current_type] | result
-                elif isinstance(result, list):
-                    k = list(result[0].keys())[0]
-                    if k not in data[current_type]: data[current_type][k] = {}
-                    for r in result[1:]:
-                        if isinstance(r, dict): data[current_type][k].update(r)
+            if "analysis" not in data:
+                data["analysis"] = {}
+
+            if isinstance(result, dict):
+                deep_merge(data["analysis"], result)
+            elif isinstance(result, list):
+                pass
+
         case _:
             print(f"[FLOW-DEBUG] [WARN] Unknown node type encountered: {node_type}")
 

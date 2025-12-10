@@ -34,10 +34,13 @@ class AiService(BaseService):
         # --- RÉCUPÉRATION DYNAMIQUE DU FLUX ---
         
         # 1. On cherche un flow_id dans la requête, sinon on prend le premier disponible
-        flow_id = data.get("flow_id", "69348747056da4e007ec00dd")
+        flow_id = data.get("flow_id", None)
         flow_doc = None
-        
-        if flow_id:
+        print(f"[AiService] Requested flow_id: {flow_id}")
+
+        if not flow_id:
+            flow_doc = self.flow_service.get_default_flow()
+        elif flow_id:
             flow_doc = self.flow_service.get_flow(flow_id=flow_id)
         else:
             # Fallback : on prend le premier flux trouvé
@@ -59,7 +62,7 @@ class AiService(BaseService):
         # --- FIN MODIFICATIONS ---
 
         type = result.get("type", "unknown")
-        analysis = result.get(type, {})
+        analysis = result.get("analysis", {})
 
         document["type"] = type
         document["analysis"] = analysis
