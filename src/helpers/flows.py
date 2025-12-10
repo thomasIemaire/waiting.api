@@ -283,12 +283,33 @@ def node_agent_group(config, text, *, debug=False):
             try:
                 agent_res = json.loads(m_str)
                 # Merge dans le résultat final (attention aux écrasements si clés identiques)
-                final_combined_mapper.update(agent_res)
+                for key, value in agent_res.items():
+                    if key in final_combined_mapper:
+                        existing = final_combined_mapper[key]
+                        if isinstance(existing, dict) and isinstance(value, dict):
+                            deep_merge(existing, value)
+                        elif isinstance(existing, list):
+                            if value not in existing:
+                                existing.append(value)
+                        elif existing != value:
+                            final_combined_mapper[key] = [existing, value]
+                    else:
+                        final_combined_mapper[key] = value
             except:
                 pass
         else:
-             # Fallback
-             final_combined_mapper.update({k: v["word"] for k, v in best_entities.items()})
+            # Fallback
+            for k, v in best_entities.items():
+                val = v.get("word")
+                if k in final_combined_mapper:
+                    existing = final_combined_mapper[k]
+                    if isinstance(existing, list):
+                        if val not in existing:
+                            existing.append(val)
+                    elif existing != val:
+                        final_combined_mapper[k] = [existing, val]
+                else:
+                    final_combined_mapper[k] = val
 
     print(f"[FLOW-DEBUG] <<< Node Agent Group FINISHED. Result keys: {list(final_combined_mapper.keys())}")
     return final_combined_mapper
