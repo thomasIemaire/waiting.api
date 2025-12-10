@@ -239,20 +239,53 @@ def node_agent_group(config, text, *, debug=False):
         else:
             processed_text_list.append(str(t))
 
-    # Agrégation globale pour le groupe
-    aggregated_entities_by_agent = {} # { agent_model: { LABEL: best_entity } }
+    def _tag_value(value, model_name):
+        """Ajoute une provenance pour suivre quel agent a produit la valeur."""
+        if isinstance(value, dict):
+            tagged = {**value}
+            # N'écrase pas une provenance déjà présente
+            tagged.setdefault("_source_agent", model_name)
+            return tagged
+        return value
+
+    def _merge_agent_result(container: dict, agent_result: dict, model_name: str):
+        for key, value in agent_result.items():
+            tagged_value = _tag_value(value, model_name)
+
+            if key not in container:
+                container[key] = tagged_value
+                continue
+
+            existing = container[key]
+
+            # Si les deux sont des dictionnaires, on essaie d'unifier par agent
+            if isinstance(existing, dict) and isinstance(tagged_value, dict):
+                if existing.get("_source_agent") == tagged_value.get("_source_agent"):
+                    deep_merge(existing, tagged_value)
+                else:
+                    container[key] = [existing, tagged_value]
+            elif isinstance(existing, list):
+                # On évite les doublons en comparant la représentation JSON (ordre stable)
+                serialized = json.dumps(tagged_value, sort_keys=True)
+                if not any(json.dumps(item, sort_keys=True) == serialized for item in existing):
+                    existing.append(tagged_value)
+            elif existing != tagged_value:
+                container[key] = [existing, tagged_value]
+
+    # Agrégation globale pour le groupe (on garde le meilleur par agent, puis on fusionne en conservant les doublons)
+    aggregated_entities_by_agent = {}  # { agent_model: { LABEL: best_entity } }
     mappers_by_agent = {}
 
     for page_text in processed_text_list:
         for agent in agents:
             model = agent.get("model", "")
             version = agent.get("version", "")
-            
+
             if model not in aggregated_entities_by_agent:
                 aggregated_entities_by_agent[model] = {}
 
             current, mapper = run_agent(page_text, reference=model, version=version)
-            
+
             if mapper and model not in mappers_by_agent:
                 mappers_by_agent[model] = mapper
 
@@ -262,15 +295,14 @@ def node_agent_group(config, text, *, debug=False):
                 if not best_so_far or score > best_so_far.get("score", 0):
                     aggregated_entities_by_agent[model][label] = entity
 
-    # Construction du résultat final combiné
     final_combined_mapper = {}
-    
-    # On itère sur chaque agent pour reconstruire son morceau de JSON
+
     for agent in agents:
         model = agent.get("model", "")
         mapper_template = mappers_by_agent.get(model, {})
         best_entities = aggregated_entities_by_agent.get(model, {})
-        
+
+        agent_result = {}
         if mapper_template:
             m_str = json.dumps(mapper_template, ensure_ascii=False)
             for label, ent in best_entities.items():
@@ -278,38 +310,16 @@ def node_agent_group(config, text, *, debug=False):
                 m_str = m_str.replace(f'"{label}"', json.dumps(val))
                 token = f"{model.upper()}_{label.upper()}"
                 m_str = m_str.replace(f'"{token}"', json.dumps(val))
-            
+
             m_str = clean_tokens(m_str, model)
             try:
-                agent_res = json.loads(m_str)
-                # Merge dans le résultat final (attention aux écrasements si clés identiques)
-                for key, value in agent_res.items():
-                    if key in final_combined_mapper:
-                        existing = final_combined_mapper[key]
-                        if isinstance(existing, dict) and isinstance(value, dict):
-                            deep_merge(existing, value)
-                        elif isinstance(existing, list):
-                            if value not in existing:
-                                existing.append(value)
-                        elif existing != value:
-                            final_combined_mapper[key] = [existing, value]
-                    else:
-                        final_combined_mapper[key] = value
-            except:
-                pass
+                agent_result = json.loads(m_str)
+            except Exception:
+                agent_result = {}
         else:
-            # Fallback
-            for k, v in best_entities.items():
-                val = v.get("word")
-                if k in final_combined_mapper:
-                    existing = final_combined_mapper[k]
-                    if isinstance(existing, list):
-                        if val not in existing:
-                            existing.append(val)
-                    elif existing != val:
-                        final_combined_mapper[k] = [existing, val]
-                else:
-                    final_combined_mapper[k] = val
+            agent_result = {k: v.get("word") for k, v in best_entities.items()}
+
+        _merge_agent_result(final_combined_mapper, agent_result, model)
 
     print(f"[FLOW-DEBUG] <<< Node Agent Group FINISHED. Result keys: {list(final_combined_mapper.keys())}")
     return final_combined_mapper
