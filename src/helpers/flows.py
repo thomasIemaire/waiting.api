@@ -222,6 +222,14 @@ def node_agent(config, text, *, debug=False):
         final_mapper = {k: v["word"] for k, v in aggregated_entities.items()}
 
     print(f"[FLOW-DEBUG] <<< Agent '{model}' Result keys (Aggregated): {list(final_mapper.keys())}")
+
+    root = str(config.get("root", "")).strip()
+    if root:
+        wrapped_result = {}
+        set_by_path(wrapped_result, root, final_mapper)
+        print(f"[FLOW-DEBUG] Wrapped agent result in root '{root}'")
+        return wrapped_result
+    
     return final_mapper
 
 def node_agent_group(config, text, *, debug=False):
@@ -322,6 +330,14 @@ def node_agent_group(config, text, *, debug=False):
         _merge_agent_result(final_combined_mapper, agent_result, model)
 
     print(f"[FLOW-DEBUG] <<< Node Agent Group FINISHED. Result keys: {list(final_combined_mapper.keys())}")
+
+    root = str(config.get("root", "")).strip()
+    if root:
+        wrapped_result = {}
+        set_by_path(wrapped_result, root, final_combined_mapper)
+        print(f"[FLOW-DEBUG] Wrapped agent group result in root '{root}'")
+        return wrapped_result
+    
     return final_combined_mapper
 
 def get_by_path(d, path):
