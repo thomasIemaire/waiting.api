@@ -58,6 +58,18 @@ def get_token_classifier(model_dir: str) -> Pipeline:
 
     return pipeline("token-classification", model=model, tokenizer=tokenizer, aggregation_strategy="simple", device=-1)
 
+# ---------- INFERENCE CACHE (NOUVEAU) ----------
+@lru_cache(maxsize=512)
+def _infer_and_cache(model_dir: str, text: str) -> List[Dict[str, Any]]:
+    try:
+        nlp = get_token_classifier(model_dir)
+        raw_entities = nlp(text)
+        # On nettoie les types numpy ici pour que le cache contienne du pur Python
+        return utils._pyify(raw_entities)
+    except Exception as e:
+        print(f"[ERROR] Erreur inférence {model_dir}: {e}")
+        return []
+
 # ---------- Utils ----------
 def clean_text(text: str) -> str:
     return text.replace("\r", " ").replace("\n", " ").strip()
@@ -74,26 +86,21 @@ def run(text: str, *, reference: str, version: str):
         real_ver = agent.get("version", version) if agent else version
         model_dir = os.path.normpath(os.path.join("..", f"sardine.agents/{reference}/{real_ver}"))
 
-    # Chargement
-    try:
-        nlp = get_token_classifier(model_dir)
-    except Exception as e:
-        print(f"[ERROR] Erreur modèle {reference}: {e}")
-        return {}, {}
-
     text_clean = clean_text(text)
     if not text_clean: return {}, {}
 
-    try:
-        raw_entities = nlp(text_clean)
-    except Exception as e:
-        print(f"[ERROR] Erreur inférence {reference}: {e}")
-        return {}, {}
+    # --- MODIFICATION: Utilisation du cache ---
+    # Au lieu d'appeler nlp() directement, on passe par la fonction mise en cache
+    cached_entities = _infer_and_cache(model_dir, text_clean)
+    
+    # IMPORTANT: On doit copier les dictionnaires car la suite du code les modifie
+    # (ajout de la clé 'word'). Sans copie, on modifierait l'objet dans le cache,
+    # ce qui créerait des effets de bord lors des appels suivants.
+    entities = [e.copy() for e in cached_entities]
+    # ------------------------------------------
 
     mapper = agent.get("mapper", {}) if agent else {}
     print(f"[INFO] Agent '{reference}' v{version} - mapper: {mapper}")
-
-    entities = utils._pyify(raw_entities)
 
     print(f"[DEBUG] text_clean: {text_clean}")
     
@@ -101,6 +108,7 @@ def run(text: str, *, reference: str, version: str):
     for ent in entities:
         if ent.get("score", 0) >= 0.5: # Seuil légèrement baissé par sécurité
             start, end = ent.get("start"), ent.get("end")
+            # C'est ici qu'on modifie l'entité (d'où l'importance du copy() plus haut)
             ent["word"] = text_clean[start:end]
             valid_entities.append(ent)
 
