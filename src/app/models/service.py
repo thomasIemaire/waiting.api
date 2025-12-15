@@ -213,6 +213,9 @@ class ModelsService(BaseService):
             {"version": utils.increment_version(model.get("version", "1.0"), "minor")}
         )
 
+        print( "---- MODEL SERVICE: BUILD MODEL ----" )
+        print(f"Parameters: {parameters}")
+
         dataset_payload = {
             **model,
             "status": "to-build",

@@ -99,7 +99,7 @@ class DatasetsService(BaseService):
         self.dao.delete_one({"_id": ObjectId(id)})
         self.dao.db["datasets_data"].delete_many({"dataset": ObjectId(id)})
 
-    def train_dataset(self, dataset_id: str, user_id: str, parameters: dict):
+    def train_dataset(self, dataset_id: str, user_id: str):
         self.get_document(id=dataset_id)
         user = self.user_service.get_document(id=user_id, projection={
             "_id": 1,
@@ -110,7 +110,7 @@ class DatasetsService(BaseService):
 
         self.dao.update_one(
             {"_id": ObjectId(dataset_id)},
-            {"parameters": parameters, "trained_by": user, "status": "to-train"}
+            {"trained_by": user, "status": "to-train"}
         )
 
         return {"message": "Dataset is ready to be trained."}

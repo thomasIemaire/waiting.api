@@ -41,9 +41,8 @@ def create_datasets_router(db: Database) -> Blueprint:
     @bp.post("/train/<id>")
     @jwt_required()
     def train_dataset(id: str):
-        parameters = request.get_json(silent=True) or {}
         try:
-            result = service.train_dataset(id, get_jwt_identity(), parameters)
+            result = service.train_dataset(id, get_jwt_identity())
         except ValueError as err:
             return json_error(str(err), 404)
         return jsonify(result), 200
