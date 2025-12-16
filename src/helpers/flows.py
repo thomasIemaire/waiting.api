@@ -1,4 +1,5 @@
 from platform import node
+import hashlib
 import threading, time, re, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -131,7 +132,22 @@ def clean_tokens(mapper_str: str, model: str) -> str:
     cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
     return cleaned
 
-def node_agent(config, text, *, debug=False):
+def _get_agent_zone_cache(data: dict | None):
+    if isinstance(data, dict):
+        return data.setdefault("_agent_zone_results", {})
+    return None
+
+
+def _zone_cache_key(zone_text: str, zone_index: int) -> str:
+    digest = hashlib.sha1(zone_text.encode("utf-8", errors="ignore")).hexdigest()
+    return f"{zone_index}:{digest}"
+
+
+def _sum_entity_scores(entities: dict[str, dict]) -> float:
+    return sum(ent.get("score", 0) for ent in entities.values())
+
+
+def node_agent(config, text, *, debug=False, data=None):
     model = config.get("model", "")
     version = config.get("version", "")
     type = config.get("type", "single")
@@ -182,46 +198,74 @@ def node_agent(config, text, *, debug=False):
         processed_text_list = [combined_text]
         print(f"[FLOW-DEBUG] [AGENT] Processing all text at once. Combined length: {len(combined_text)}")
 
-    # --- AGREGATION ---
-    # On parcourt TOUTES les zones et on garde le meilleur résultat pour chaque champ
-    aggregated_entities = {} # { "LABEL": {"word": "...", "score": ...} }
+    cache_container = _get_agent_zone_cache(data)
     mapper_template = {}
+    best_zone_result = None
 
-    for zone_text in processed_text_list:
-        current_entities, mapper = run_agent(zone_text, reference=model, version=version)
+    for idx, zone_text in enumerate(processed_text_list):
+        agent_key = f"{model}:{version}"
+        zone_key = _zone_cache_key(zone_text, idx)
+        cached_entities = None
+        cached_mapper = None
+        cached_score = None
 
-        # On sauvegarde le template de mapper s'il n'est pas encore défini
+        if cache_container is not None:
+            agent_cache = cache_container.setdefault(agent_key, {})
+            if zone_key in agent_cache:
+                cached = agent_cache[zone_key]
+                cached_entities = cached.get("entities", {})
+                cached_mapper = cached.get("mapper", {})
+                cached_score = cached.get("score")
+
+        if cached_entities is not None:
+            current_entities = cached_entities
+            mapper = cached_mapper or {}
+            zone_score = cached_score if cached_score is not None else _sum_entity_scores(current_entities)
+            print(f"[FLOW-DEBUG] [AGENT] Using cached zone result for zone {idx} (score={zone_score:.4f}).")
+        else:
+            current_entities, mapper = run_agent(zone_text, reference=model, version=version)
+            zone_score = _sum_entity_scores(current_entities)
+
+            if cache_container is not None:
+                cache_container.setdefault(agent_key, {})[zone_key] = {
+                    "entities": current_entities,
+                    "mapper": mapper,
+                    "score": zone_score,
+                }
+
         if mapper and not mapper_template:
             mapper_template = mapper
 
-        # Fusion intelligente: on garde le meilleur score pour chaque label
-        for label, entity in current_entities.items():
-            score = entity.get("score", 0)
-            if label not in aggregated_entities or score > aggregated_entities[label].get("score", 0):
-                aggregated_entities[label] = entity
+        if best_zone_result is None or zone_score > best_zone_result.get("score", 0):
+            best_zone_result = {
+                "entities": current_entities,
+                "score": zone_score,
+                "mapper": mapper,
+            }
 
-    # Construction du résultat final à partir des meilleures entités trouvées
     final_mapper = {}
-    if mapper_template:
-        mapper_str = json.dumps(mapper_template, ensure_ascii=False)
-        for label, entity in aggregated_entities.items():
-            val = entity.get("word", "")
-            # Remplacement intelligent
-            mapper_str = mapper_str.replace(f'"{label}"', json.dumps(val)) # Clé directe
-            token = f"{model.upper()}_{label.upper()}"
-            mapper_str = mapper_str.replace(f'"{token}"', json.dumps(val)) # Token complet
+    if best_zone_result:
+        best_entities = best_zone_result.get("entities", {})
+        mapper_template = mapper_template or best_zone_result.get("mapper", {})
 
-        mapper_str = clean_tokens(mapper_str, model)
-        try:
-            final_mapper = json.loads(mapper_str)
-        except:
-            print("[FLOW-DEBUG] [AGENT] Error parsing JSON mapper result.")
-            final_mapper = {}
-    elif aggregated_entities:
-        # Fallback si pas de mapper (ex: mode sans config)
-        final_mapper = {k: v["word"] for k, v in aggregated_entities.items()}
+        if mapper_template:
+            mapper_str = json.dumps(mapper_template, ensure_ascii=False)
+            for label, entity in best_entities.items():
+                val = entity.get("word", "")
+                mapper_str = mapper_str.replace(f'"{label}"', json.dumps(val))
+                token = f"{model.upper()}_{label.upper()}"
+                mapper_str = mapper_str.replace(f'"{token}"', json.dumps(val))
 
-    print(f"[FLOW-DEBUG] <<< Agent '{model}' Result keys (Aggregated): {list(final_mapper.keys())}")
+            mapper_str = clean_tokens(mapper_str, model)
+            try:
+                final_mapper = json.loads(mapper_str)
+            except Exception:
+                print("[FLOW-DEBUG] [AGENT] Error parsing JSON mapper result.")
+                final_mapper = {}
+        else:
+            final_mapper = {k: v.get("word") for k, v in best_entities.items()}
+
+    print(f"[FLOW-DEBUG] <<< Agent '{model}' Result keys (Best zone): {list(final_mapper.keys())}")
 
     root = str(config.get("root", "")).strip()
     if root:
@@ -232,7 +276,7 @@ def node_agent(config, text, *, debug=False):
     
     return final_mapper
 
-def node_agent_group(config, text, *, debug=False):
+def node_agent_group(config, text, *, debug=False, data=None):
     agents = config.get("agents", [])
     print(f"[FLOW-DEBUG] >>> Node Agent Group ({len(agents)} agents) STARTED")
 
@@ -280,35 +324,67 @@ def node_agent_group(config, text, *, debug=False):
             elif existing != tagged_value:
                 container[key] = [existing, tagged_value]
 
-    # Agrégation globale pour le groupe (on garde le meilleur par agent, puis on fusionne en conservant les doublons)
-    aggregated_entities_by_agent = {}  # { agent_model: { LABEL: best_entity } }
-    mappers_by_agent = {}
+    cache_container = _get_agent_zone_cache(data)
 
-    for page_text in processed_text_list:
+    best_zone_by_agent = {}  # { agent_model: {entities, score, mapper} }
+    mapper_templates_by_agent = {}
+
+    for idx, page_text in enumerate(processed_text_list):
         for agent in agents:
             model = agent.get("model", "")
             version = agent.get("version", "")
 
-            if model not in aggregated_entities_by_agent:
-                aggregated_entities_by_agent[model] = {}
+            agent_key = f"{model}:{version}"
+            zone_key = _zone_cache_key(page_text, idx)
 
-            current, mapper = run_agent(page_text, reference=model, version=version)
+            cached_entities = None
+            cached_mapper = None
+            cached_score = None
 
-            if mapper and model not in mappers_by_agent:
-                mappers_by_agent[model] = mapper
+            if cache_container is not None:
+                agent_cache = cache_container.setdefault(agent_key, {})
+                if zone_key in agent_cache:
+                    cached = agent_cache[zone_key]
+                    cached_entities = cached.get("entities", {})
+                    cached_mapper = cached.get("mapper", {})
+                    cached_score = cached.get("score")
 
-            for label, entity in current.items():
-                score = entity.get("score", 0)
-                best_so_far = aggregated_entities_by_agent[model].get(label)
-                if not best_so_far or score > best_so_far.get("score", 0):
-                    aggregated_entities_by_agent[model][label] = entity
+            if cached_entities is not None:
+                current = cached_entities
+                mapper = cached_mapper or {}
+                zone_score = cached_score if cached_score is not None else _sum_entity_scores(current)
+                print(f"[FLOW-DEBUG] [AGENT-GROUP] Using cached zone result for agent {model} zone {idx} (score={zone_score:.4f}).")
+            else:
+                current, mapper = run_agent(page_text, reference=model, version=version)
+                zone_score = _sum_entity_scores(current)
+
+                if cache_container is not None:
+                    cache_container.setdefault(agent_key, {})[zone_key] = {
+                        "entities": current,
+                        "mapper": mapper,
+                        "score": zone_score,
+                    }
+
+            if mapper and model not in mapper_templates_by_agent:
+                mapper_templates_by_agent[model] = mapper
+
+            best_so_far = best_zone_by_agent.get(model)
+            if best_so_far is None or zone_score > best_so_far.get("score", 0):
+                best_zone_by_agent[model] = {
+                    "entities": current,
+                    "score": zone_score,
+                    "mapper": mapper,
+                }
 
     final_combined_mapper = {}
 
     for agent in agents:
         model = agent.get("model", "")
-        mapper_template = mappers_by_agent.get(model, {})
-        best_entities = aggregated_entities_by_agent.get(model, {})
+        mapper_template = mapper_templates_by_agent.get(model, {})
+        zone_result = best_zone_by_agent.get(model, {})
+        best_entities = zone_result.get("entities", {})
+        if not mapper_template:
+            mapper_template = zone_result.get("mapper", {})
 
         agent_result = {}
         if mapper_template:
@@ -658,7 +734,7 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
             if not pages_text:
                 print("[FLOW-DEBUG] [WARN] Agent node executed but NO PAGES found in data!")
             
-            result = node_agent(node_config, pages_text, debug=debug)
+            result = node_agent(node_config, pages_text, debug=debug, data=data)
             
             if "analysis" not in data:
                 data["analysis"] = {}
@@ -668,7 +744,7 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
 
         case "agent-group":
             pages_text = data.get("pages", [])
-            result = node_agent_group(node_config, pages_text, debug=debug)
+            result = node_agent_group(node_config, pages_text, debug=debug, data=data)
             
             if "analysis" not in data:
                 data["analysis"] = {}

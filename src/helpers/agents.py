@@ -31,7 +31,6 @@ def get_db():
 db = get_db()
 
 # ---------- CONFIG CACHE ----------
-@lru_cache(maxsize=32)
 def _get_agent_config(reference: str, version: str) -> dict | None:
     if db is None: return None
     if version == "latest":
@@ -59,12 +58,10 @@ def get_token_classifier(model_dir: str) -> Pipeline:
     return pipeline("token-classification", model=model, tokenizer=tokenizer, aggregation_strategy="simple", device=-1)
 
 # ---------- INFERENCE CACHE (NOUVEAU) ----------
-@lru_cache(maxsize=512)
-def _infer_and_cache(model_dir: str, text: str) -> List[Dict[str, Any]]:
+def _infer(model_dir: str, text: str) -> List[Dict[str, Any]]:
     try:
         nlp = get_token_classifier(model_dir)
         raw_entities = nlp(text)
-        # On nettoie les types numpy ici pour que le cache contienne du pur Python
         return utils._pyify(raw_entities)
     except Exception as e:
         print(f"[ERROR] Erreur inférence {model_dir}: {e}")
@@ -89,15 +86,7 @@ def run(text: str, *, reference: str, version: str):
     text_clean = clean_text(text)
     if not text_clean: return {}, {}
 
-    # --- MODIFICATION: Utilisation du cache ---
-    # Au lieu d'appeler nlp() directement, on passe par la fonction mise en cache
-    cached_entities = _infer_and_cache(model_dir, text_clean)
-    
-    # IMPORTANT: On doit copier les dictionnaires car la suite du code les modifie
-    # (ajout de la clé 'word'). Sans copie, on modifierait l'objet dans le cache,
-    # ce qui créerait des effets de bord lors des appels suivants.
-    entities = [e.copy() for e in cached_entities]
-    # ------------------------------------------
+    entities = _infer(model_dir, text_clean)
 
     mapper = agent.get("mapper", {}) if agent else {}
     print(f"[INFO] Agent '{reference}' v{version} - mapper: {mapper}")
