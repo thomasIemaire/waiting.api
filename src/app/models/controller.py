@@ -77,7 +77,7 @@ def create_models_router(db: Database) -> Blueprint:
     @bp.post("/build/<id>")
     @jwt_required()
     def build_model(id: str):
-        parameters = request.get_json(silent=True) or {}
+        parameters = request.get_json(silent=True)
         try:
             result = service.build_model(id, parameters, user_id=get_jwt_identity())
         except ValueError as err:
