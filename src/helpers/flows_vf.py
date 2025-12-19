@@ -1,14 +1,20 @@
+import base64
 import time
 import json
 import re
 import ast
+from uuid import uuid4
+from datetime import datetime
 import operator as op
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, List, List, Literal, Optional, Union
+import numpy as np
+from scipy import io
 
 # ========= CONSTANTS =========
 FLOW_MAX_WORKERS = 4
+
 
 # ========= Patterns =========
 _ALLOWED_BINOPS = {
@@ -20,11 +26,15 @@ _ALLOWED_BINOPS = {
     ast.Mod: op.mod,
     ast.Pow: op.pow,
 }
+
 _ALLOWED_UNARYOPS = {ast.UAdd: op.pos, ast.USub: op.neg}
 
 _BRACED_PATH_RE = re.compile(r"\$\{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\}")
 
 _DOLLAR_PATH_RE = re.compile(r"\$([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
+
+_DATAURL_RE = re.compile(r'data:(?P<mime>[\w/-]+)?(;base64)?,(?P<data>.+)', re.IGNORECASE)
+
 
 # ========= Helpers =========
 def print_debug(
@@ -75,6 +85,11 @@ def set_value_at_path(data: dict, path: str, value: Any) -> None:
     if not isinstance(current, dict):
         raise TypeError(f"Cannot set into non-dict for path '{path}'")
     current[keys[-1]] = value
+
+
+def add_value_at_path(data: dict, path: str, value: dict) -> None:
+    for k, v in value.items():
+        set_value_at_path(data, f"{path}.{k}", v)
 
 
 def _to_python_expr(expr: str) -> str:
@@ -171,6 +186,203 @@ def resolve_value(data: dict, value: Any) -> Any:
     return _safe_eval(pyexpr, funcs)
 
 
+def normalize_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    return str(value)
+
+
+# ========= Sardine Utilities =========
+from PIL import Image
+
+def extract_images_from_base64(
+        base64: Any,
+        *,
+        debug: bool = False,
+        page_dpi: int = 200,
+        page_mode: Literal["first_page_only", "all_pages"] = "first_page_only",
+) -> List[Image.Image]:
+    images = load_images_from_base64(
+        base64,
+        page_mode=page_mode,
+        page_dpi=page_dpi,
+        debug=debug
+    )
+
+    if not images:
+        print_debug("[SARDINE] No images extracted from base64 data.", debug, tags=["SARDINE", "EXTRACT_IMAGES"])
+        return []
+    
+    return images
+
+
+def load_images_from_base64(
+        base64: Any,
+        page_mode: Literal["first_page_only", "all_pages"] = "first_page_only",
+        page_dpi: int = 200,
+        *,
+        debug: bool = False
+) -> List[Image.Image]:
+    raw_bytes, mime = _try_decode_base64(base64)
+
+    if raw_bytes is None:
+        print_debug("[SARDINE] No valid base64 data found.", debug, tags=["SARDINE", "LOAD_IMAGES"])
+        return []
+
+    try:
+        is_pdf = (mime == "application/pdf") or (mime is None and raw_bytes[:4] == b"%PDF")
+        return _load_pil_from_pdf(raw_bytes, page_mode=page_mode, dpi=page_dpi) if is_pdf else [_load_pil_from_bytes(raw_bytes)]
+    except Exception as e:
+        print_debug(f"[SARDINE] Error loading images: {e}", debug, tags=["SARDINE", "LOAD_IMAGES"])
+        return []
+
+
+def _load_pil_from_pdf(
+        raw_bytes: bytes,
+        page_mode: Literal["first_page_only", "all_pages"] = "first_page_only",
+        dpi: int = 200,
+        *,
+        debug: bool = False
+) -> List[Image.Image]:
+    try:
+        import fitz
+    except ImportError:
+        print_debug("[SARDINE] fitz (PyMuPDF) library is not installed.", debug, tags=["SARDINE", "LOAD_PDF"])
+        return []
+    
+    images: List[Image.Image] = []
+    try:
+        with fitz.open(stream=raw_bytes, filetype="pdf") as doc:
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                mat = fitz.Matrix(dpi / 72, dpi / 72)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_bytes = pix.tobytes()
+                img = _load_pil_from_bytes(img_bytes)
+                images.append(img)
+                print_debug(f"[SARDINE] Loaded page {page_num + 1}/{len(doc)}", debug, tags=["SARDINE", "LOAD_PDF"])
+                if page_mode == "first_page_only":
+                    break
+    except Exception as e:
+        print_debug(f"[SARDINE] Error loading PDF pages: {e}", debug, tags=["SARDINE", "LOAD_PDF"])
+        return []
+
+    return images
+
+
+def _load_pil_from_bytes(img_bytes: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+
+def _try_decode_base64(s: str) -> tuple[Optional[bytes], Optional[str]]:
+    if not isinstance(s, str) or not s.strip(): return None, None
+    m = _DATAURL_RE.match(s.strip())
+    if m:
+        try:
+            return base64.b64decode(m.group("data"), validate=True), (m.group("mime") or "").lower()
+        except: 
+            return None, None
+    try:
+        return base64.b64decode(s), None
+    except: 
+        return None, None
+
+
+def _predict_document_class(
+        images: List[Image.Image],
+        model_path: str,
+        device: str = "cpu",
+        *,
+        debug: bool = False
+) -> List[str]:
+    try:
+        return classify_pages(
+            get_cached_yolo_model(model_path),
+            images,
+            device=device,
+            debug=debug
+        )
+    except Exception as e:
+        print_debug(f"[SARDINE] Document classification failed: {e}", debug, tags=["SARDINE", "CLASSIFY"])
+        return []
+
+
+def classify_pages(
+        model_cls: YOLO,
+        sources: List[Image.Image],
+        device: str = "cpu",
+        *,
+        debug: bool = False
+) -> List[str]:
+    cls = model_cls.predict(source=sources, device=device, save=False, verbose=False)
+    results = []
+    for r in cls:
+        if hasattr(r, 'probs') and r.probs is not None:
+            top1 = r.probs.top1
+            name = r.names[top1]
+        else:
+            print_debug("[SARDINE] No classification probabilities found.", debug, tags=["SARDINE", "CLASSIFY"])
+            name = "unknown"
+        results.append(name)
+    return results
+    
+
+def _predict_document_detection(
+        images: List[Image.Image],
+        model_path: str,
+        device: str = "cpu",
+        conf: float = 0.25,
+        *,
+        debug: bool = False,
+        padding: int = 8,
+) -> List[dict]:
+    model_det = get_cached_yolo_model(model_path)
+
+    try:
+        det_results = model_det.predict(
+            source=images,
+            save=False,
+            conf=conf,
+            device=device,
+            verbose=False
+        )
+    except Exception as e:
+        print_debug(f"[SARDINE] Document detection failed: {e}", debug, tags=["SARDINE", "DETECT"])
+        return []
+
+    output: List[List[str]] = []
+
+    for img, res in zip(images, det_results):
+        page_output = []
+        W, H = img.size
+
+        if res.boxes and len(res.boxes) > 0:
+            xyxy = res.boxes.xyxy.cpu().numpy() if hasattr(res.boxes.xyxy, "cpu") else res.boxes.xyxy.numpy()
+            xyxy = xyxy.astype(int)
+            order = np.lexsort((xyxy[:, 0], xyxy[:, 1]))
+            xyxy = xyxy[order]
+
+            crops = []
+            for (x1, y1, x2, y2) in xyxy:
+                x1p, y1p = max(0, x1 - padding), max(0, y1 - padding)
+                x2p, y2p = min(W, x2 + padding), min(H, y2 + padding)
+                if x2p > x1p and y2p > y1p:
+                    crops.append(img.crop((x1p, y1p, x2p, y2p)))
+            
+            if crops:
+                texts = _ocr_many_pil(crops)
+                page_output = [t.strip() for t in texts]
+
+        if not page_output:
+            full_text = _ocr_pil_image(img)
+            if full_text:
+                page_output.append(full_text)
+        
+        output.append(page_output)
+    
+    return output
+
+
 # ========= Node Utilities =========
 def get_node_by_id(flow: dict, node_id: str) -> Optional[dict]:
     return flow.get(node_id, None)
@@ -184,6 +396,25 @@ def get_node_parents(node: dict) -> list:
     return node.get("inputs", [])
 
 
+def get_node_config(node: dict) -> dict:
+    return node.get("config", {})
+
+
+def add_user_approval(
+        input: dict,
+        message: str,
+        *,
+        key_path: str | None = None,
+        debug: bool = False,
+) -> None:
+    print_debug(f"User approval requested: {message}", debug, tags=["NODE", "APPROVAL"])
+    approval_id = uuid4().hex if not key_path else key_path.replace(".", "_")
+    set_value_at_path(input, f"user_approvals.{approval_id}", {
+        "message": message,
+        "approved": False,
+    })
+
+
 # ========= Nodes Processing =========
 def process_node(
     node: dict,
@@ -192,18 +423,21 @@ def process_node(
     node_id: Optional[str] = None,
     debug: bool = False,
 ) -> tuple[bool, dict]:
-    print_debug(
-        f"START Processing {node_id} (Type: {node.get('type')})",
-        debug,
-        tags=["NODE", "THREAD"],
-    )
+    start = time.time()
+    print_debug(f"START Processing {node_id} (Type: {node.get('type')})", debug, tags=["NODE", "INFO"])
+
     node_config = node.get("config", {})
     node_root = node_config.get("root", None)
 
-    status, output = execute_node_by_type(node, input, debug=debug)
+    status, output, children = execute_node_by_type(node, input, debug=debug)
 
-    print_debug(f"END Processing {node_id}", debug, tags=["NODE", "THREAD"])
-    return status, output if not node_root else {node_root: output}
+    time.sleep(0.1)
+
+    end = time.time()
+    print_debug(f"END Processing {node_id} (Duration: {end - start:.2f}s)", debug, tags=["NODE", "INFO"])
+    set_value_at_path(input, f"_debug.nodes.{node_id}.duration", end - start)
+
+    return status, output if not node_root else {node_root: output}, children
 
 
 def execute_node_by_type(
@@ -216,19 +450,35 @@ def execute_node_by_type(
     if not node_type:
         print_debug("Node type is missing.", debug, tags=["NODE", "ERROR"])
         raise ValueError("Node type is missing")
+    
+    status = True
+    output: dict = {}
+    children: list | None = None
 
     match node_type:
-        case "start":
-            return True, (input or {})
         case "edit":
-            return True, node_edit(node, input, debug=debug)
+            status, output = True, node_edit(node, input, debug=debug)
+        case "switch":
+            status, output_key = node_switch(node, input, debug=debug)
+            children = get_node_children(node)[output_key]
+            output = {}
+        case "if":
+            status, output_key = node_if(node, input, debug=debug)
+            children = get_node_children(node)[output_key]
+            output = {}
+        case "http":
+            status, output = node_http(node, input, debug=debug)
         case "final":
-            return True, (input or {})
-        case _:
+            status, output, children = True, input or {}, []
+
+        case "debug":
             import random
-            output = {"result": random.randint(1, 100)}
+            status, output =  True, {"result": random.randint(1, 100)}
+        case _:
             print_debug(f"Unknown node type: {node_type}", debug, tags=["NODE", "WARNING"])
-            return True, output
+            status, output = True, {}
+    
+    return status, output, get_node_children(node) if children is None else children
 
 
 def node_edit(
@@ -245,7 +495,7 @@ def node_edit(
     Values are resolved via resolve_value() against the current context.
     """
     output = {}
-    node_config = node.get("config", {})
+    node_config = get_node_config(node)
 
     fields = node_config.get("fields", [])
     if isinstance(fields, dict):
@@ -270,9 +520,301 @@ def node_edit(
             print_debug(f"Failed to resolve '{raw_value}' for '{key_path}': {e}", debug, tags=["NODE", "EDIT", "ERROR"])
             resolved = raw_value
 
+        if get_value_from_path(input, key_path) == resolved:
+            continue
+
         set_value_at_path(output, key_path, resolved)
 
+        set_value_at_path(output, f"_traceback.{key_path}", {
+            "raw": raw_value, "resolved": resolved
+        })
+
+        if field.get("user_approval", True):
+            add_user_approval(
+                output,
+                message=f"Please approve the change to '{key_path}': {resolved}",
+                key_path=key_path,
+                debug=debug
+            )
+
     return output
+
+
+def node_switch(
+        node: dict,
+        input: Optional[dict] = None,
+        *,
+        debug: bool = False,
+) -> tuple[bool, str]:
+    """
+    Switch node: routes to one of several branches based on conditions.
+    Config should have:
+      - "cases": list of {"condition": "...", "output": "node_id"}
+      - "default": "node_id" (optional)
+    Conditions are evaluated against input context.
+    """
+    node_config = get_node_config(node)
+    key = node_config.get("key", None)
+    output_key = "default"
+
+    if key is None:
+        print_debug("Switch key is missing.", debug, tags=["NODE", "SWITCH", "ERROR"])
+        return False, output_key
+    
+    value = get_value_from_path(input, key)
+    value = str(value) if value is not None else ""
+
+    cases = node_config.get("cases", [])
+    for case in cases:
+        case_value = resolve_value(input, case.get("value", ""))
+        if str(case_value) == value:
+            output_key = case.get("name", "default")
+            break
+    
+    return True, output_key
+
+
+def node_if(
+        node: dict,
+        input: Optional[dict] = None,
+        *,
+        debug: bool = False,
+) -> tuple[bool, str]:
+    """
+    If node: evaluates a condition to determine which branches to follow.
+    Config should have:
+      - "condition": "..." (expression)
+      - "true_branch": list of node_ids
+      - "false_branch": list of node_ids
+    Condition is evaluated against input context.
+    """
+    def eval_rule(r):
+        l_value, r_value = resolve_value(input, r.get("left", "")), resolve_value(input, r.get("right", ""))
+
+        op = r.get("operator", "==")
+        l_str, r_str = normalize_value(l_value), normalize_value(r_value)
+
+        try:
+            l_num, r_num = float(l_str), float(r_str)
+            is_numeric = True
+        except (ValueError, TypeError):
+            is_numeric = False
+
+        match op:
+            case "==":
+                return l_str == r_str if not is_numeric else l_num == r_num
+            case "!=":
+                return l_str != r_str if not is_numeric else l_num != r_num
+            case "<":
+                return l_str < r_str if not is_numeric else l_num < r_num
+            case "<=":
+                return l_str <= r_str if not is_numeric else l_num <= r_num
+            case ">":
+                return l_str > r_str if not is_numeric else l_num > r_num
+            case ">=":
+                return l_str >= r_str if not is_numeric else l_num >= r_num
+            case "contains":
+                return r_str in l_str
+            case "not_contains":
+                return r_str not in l_str
+            case _:
+                print_debug(f"Unknown operator in rule: {op}", debug, tags=["NODE", "IF", "WARNING"])
+                return False
+    
+    node_config = get_node_config(node)
+    conditions = node_config.get("conditions", "")
+    matched_index = -1
+
+    for i, cond in enumerate(conditions):
+        rules = cond.get("rules", [])
+        
+        if not rules:
+            continue
+
+        current_result = eval_rule(rules[0])
+
+        for r in range(1, len(rules)):
+            l_rule = rules[r - 1]
+            r_rule = rules[r]
+            logical_op = l_rule.get("link", "AND").upper()
+
+            next_result = eval_rule(r_rule)
+
+            if logical_op == "OR":
+                current_result = current_result or next_result
+            else:
+                current_result = current_result and next_result
+
+        if current_result:
+            matched_index = i
+            break
+    
+    node_children = get_node_children(node)
+    output_key = node_children[matched_index].get("name", "false") if matched_index >= 0 else "false"
+
+    return True, output_key
+
+
+def node_http(
+        node: dict,
+        input: Optional[dict] = None,
+        *,
+        debug: bool = False,
+) -> tuple[bool, dict]:
+    """
+    HTTP node: makes an HTTP request based on config and input context.
+    Config should have:
+      - "url": "..."
+      - "method": "GET" | "POST" | ...
+      - "headers": dict
+      - "body": "..." (for POST/PUT)
+    """
+    import requests
+
+    node_config = get_node_config(node)
+
+    url = resolve_value(input, node_config.get("url", ""))
+    method = node_config.get("method", "GET").upper()
+    headers = node_config.get("headers", {})
+    body = resolve_value(input, node_config.get("body", ""))
+
+    try:
+        response = requests.request(method, url, headers=headers, data=body)
+        response.raise_for_status()
+        output = {"status_code": response.status_code, "response_body": response.text}
+        return True, output
+    except Exception as e:
+        print_debug(f"HTTP request failed: {e}", debug, tags=["NODE", "HTTP", "ERROR"])
+        return False, {}
+
+
+def node_db(
+        node: dict,
+        input: Optional[dict] = None,
+        *,
+        debug: bool = False,
+) -> tuple[bool, dict]:
+    # Placeholder for database node implementation
+    return False, {}
+
+
+def node_sardine(
+        node: dict,
+        input: Optional[dict] = None,
+        base64: Any = None,
+        *,
+        debug: bool = False,
+        images: List[Image.Image] = []
+) -> tuple[bool, List[Image.Image], List[str]]:
+    node_config = get_node_config(node)
+
+    model_path = node_config.get("model_path", "")
+    if not model_path:
+        print_debug("No model path specified for Sardine node.", debug, tags=["NODE", "SARDINE", "ERROR"])
+        return False, [], []
+
+    accepted_files = node_config.get("accepted_files", [])
+    if not accepted_files:
+        print_debug("No accepted files specified for Sardine node.", debug, tags=["NODE", "SARDINE", "ERROR"])
+        return False, [], []
+    
+    if not images:
+        page_mode: Literal["first_page_only", "all_pages"] = node_config.get("page_mode", "first_page_only")
+        page_dpi: int = node_config.get("page_dpi", 200)
+
+        images = extract_images_from_base64(
+            base64,
+            page_mode=page_mode,
+            page_dpi=page_dpi,
+            debug=debug
+        )
+
+    device = node_config.get("device", "cpu")
+
+    try:
+        classes = _predict_document_class(
+            images,
+            model_path=model_path,
+            device=device,
+            debug=debug
+        )
+    except Exception as e:
+        print_debug(f"Document classification failed: {e}", debug, tags=["NODE", "SARDINE", "ERROR"])
+        return False, [], []
+
+    accepted_images = []
+
+    for i, cls in enumerate(classes):
+        if cls in accepted_files:
+            accepted_images.append(images[i])
+
+    return True, accepted_images, classes
+
+
+def node_detection(
+        node: dict,
+        input: Optional[dict] = None,
+        *,
+        debug: bool = False,
+        images: List[Image.Image] = []
+) -> tuple[bool, dict]:
+    node_config = get_node_config(node)
+
+    model_path = node_config.get("model_path", "")
+    if not model_path:
+        print_debug("No model path specified for Detection node.", debug, tags=["NODE", "DETECTION", "ERROR"])
+        return False, {}
+
+    if not images:
+        page_mode: Literal["first_page_only", "all_pages"] = node_config.get("page_mode", "first_page_only")
+        page_dpi: int = node_config.get("page_dpi", 200)
+
+        images = extract_images_from_base64(
+            base64,
+            page_mode=page_mode,
+            page_dpi=page_dpi,
+            debug=debug
+        )
+
+    zone_padding: int = node_config.get("zone_padding", 8)
+    device = node_config.get("device", "cpu")
+    conf: float = node_config.get("confidence_threshold", 0.25)
+
+    try:
+        detections = _predict_document_detection(
+            images,
+            model_path=model_path,
+            device=device,
+            conf=conf,
+            debug=debug,
+            padding=zone_padding
+        )
+    except Exception as e:
+        print_debug(f"Document detection failed: {e}", debug, tags=["NODE", "DETECTION", "ERROR"])
+
+
+    return False, {}
+
+
+# ========= Flow Utilities =========
+def get_flow_details(flow: dict, result: dict) -> dict:
+    total_node_duration = 0.0
+    node_count = 0
+
+    for k, v in result.get("_debug", {}).get("nodes", {}).items():
+        duration = v.get("duration", 0.0)
+        total_node_duration += duration
+        node_count += 1
+
+    average_node_duration = (total_node_duration / node_count) if node_count > 0 else 0.0
+
+    flow_details = {
+        "node_count": node_count,
+        "total_node_duration": total_node_duration,
+        "average_node_duration": average_node_duration,
+    }
+
+    return flow_details
 
 
 # ========= Flows Engine =========
@@ -321,16 +863,13 @@ def process_flow(
                 nodes_running.remove(node_id)
 
                 try:
-                    status, output = future.result()
+                    status, output, children_ids = future.result()
 
                     if status:
                         nodes_completed.add(node_id)
                         if output:
                             for k, v in output.items():
                                 result = merge_dicts(result, {k: v})
-
-                        current_node = get_node_by_id(flow, node_id)
-                        children_ids = get_node_children(current_node)
 
                         for child_id in children_ids:
                             if child_id in nodes_completed or child_id in nodes_running or child_id in nodes_queued:
@@ -350,8 +889,10 @@ def process_flow(
                 except Exception as e:
                     print_debug(f"Exception in node {node_id}: {e}", debug, tags="CRITICAL")
 
+    flow_details = get_flow_details(flow, result)
+    set_value_at_path(result, "_debug.flow", flow_details)
     print_debug("Flow processing completed.", debug, tags=["FLOW"])
-
+    
     return result
 
 
@@ -367,7 +908,15 @@ def run(
     result = process_flow(flow, base64, debug=debug)
 
     end = time.time()
-    print_debug(f"Flow ended in {end - start:.2f} seconds", debug)
+    total_duration = end - start
+    print_debug(f"Flow ended in {total_duration:.2f} seconds", debug)
+
+    details = {
+        "started_at": datetime.fromtimestamp(start).isoformat(),
+        "ended_at": datetime.fromtimestamp(end).isoformat(),
+        "duration": total_duration,
+    }
+    add_value_at_path(result, "_debug.flow", details)
 
     return result
 
@@ -375,22 +924,81 @@ def run(
 if __name__ == "__main__":
     test_flow = {
         "start": {"id": "start", "type": "start", "outputs": ["node_A", "node_B"]},
-        "node_A": {"id": "node_A", "type": "action", "config": {"root": "node_A"}, "inputs": ["start"], "outputs": ["node_C"]},
-        "node_B": {"id": "node_B", "type": "action", "config": {"root": "node_B"}, "inputs": ["start"], "outputs": ["node_C"]},
+
+        # debug (random)
+        "node_A": {
+            "id": "node_A",
+            "type": "debug",
+            "config": {"root": "node_A"},
+            "inputs": ["start"],
+            "outputs": ["node_C"],
+        },
+        "node_B": {
+            "id": "node_B",
+            "type": "debug",
+            "config": {"root": "node_B"},
+            "inputs": ["start"],
+            "outputs": ["node_C"],
+        },
+
+        # edit (arithmétique + slicing)
         "node_C": {
             "id": "node_C",
             "type": "edit",
             "config": {
                 "fields": [
-                    {"key": "node_C.value", "value": "${node_A.result} + ${node_B.result}"},
-                    {"key": "seller.siren", "value": "$seller.vat.number[-9:]"},
+                    {"key": "node_C.value", "value": "${node_A.result} + ${node_B.result}", "user_approval": True},
+                    {"key": "seller.siren", "value": "${seller.vat.number}[-9:]"},
                 ]
             },
             "inputs": ["node_A", "node_B"],
             "outputs": ["node_D"],
         },
-        "node_D": {"id": "node_D", "type": "final", "inputs": ["node_C"], "outputs": []},
+
+        # switch (outputs DOIT être un dict)
+        "node_D": {
+            "id": "node_D",
+            "type": "switch",
+            "config": {
+                "key": "seller.siren",
+                "cases": [
+                    {"name": "match", "value": "456789000"},
+                ],
+            },
+            "inputs": ["node_C"],
+            "outputs": {
+                "match": ["node_MATCH"],
+                "default": ["node_DEFAULT"],
+            },
+        },
+
+        # debug sur chaque branche
+        "node_MATCH": {
+            "id": "node_MATCH",
+            "type": "debug",
+            "config": {"root": "branch.match"},
+            "inputs": ["node_D"],
+            "outputs": ["node_END_MATCH"],
+        },
+        "node_DEFAULT": {
+            "id": "node_DEFAULT",
+            "type": "debug",
+            "config": {"root": "branch.default"},
+            "inputs": ["node_D"],
+            "outputs": ["node_END_DEFAULT"],
+        },
+
+        # final (un final par branche, sinon le join bloque)
+        "node_END_MATCH": {"id": "node_END_MATCH", "type": "final", "inputs": ["node_MATCH"], "outputs": []},
+        "node_END_DEFAULT": {"id": "node_END_DEFAULT", "type": "final", "inputs": ["node_DEFAULT"], "outputs": []},
     }
 
-    initial_context = {"seller": {"vat": {"number": "FR12345678900012"}}}
-    print(json.dumps(run(test_flow, initial_context, debug=True), indent=2))
+    # 1) Force la branche "match" (vat.number -> siren = 456789000)
+    ctx_match = {"seller": {"vat": {"number": "FR000456789000"}}}
+    print("=== MATCH ===")
+    print(json.dumps(run(test_flow, ctx_match, debug=True), indent=2))
+
+    # 2) Force la branche "default" (vat.number -> siren != 456789000)
+    ctx_default = {"seller": {"vat": {"number": "FR000123456789"}}}
+    print("=== DEFAULT ===")
+    print(json.dumps(run(test_flow, ctx_default, debug=True), indent=2))

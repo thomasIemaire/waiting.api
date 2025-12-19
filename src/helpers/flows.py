@@ -755,6 +755,10 @@ def process_type(flow, node, *, data={}, nid=None, debug=False):
                 data["pages"] = pages
                 data.setdefault("analysis", {})
 
+            with open("debug_pages.json", "w", encoding="utf-8") as f:
+                json.dump(data.get("pages", []), f, ensure_ascii=False, indent=2)
+
+
             node_outputs, o2i = process_outputs(node)
 
         case "agent":
