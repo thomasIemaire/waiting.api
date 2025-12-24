@@ -40,7 +40,6 @@ def _get_agent_config(reference: str, version: str) -> dict | None:
         return None
 
     if version == "latest":
-        # NOTE: tri par "version" reste lexicographique ; si tu veux du robuste => created_at.
         cursor = db["agents"].find({"reference": reference}).sort("version", -1).limit(1)
         lst = list(cursor)
         if lst:

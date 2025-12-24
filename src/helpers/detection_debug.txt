@@ -1,0 +1,49 @@
+--- Page 1 ---
+[Zone 1]:
+{'type': 'logo', 'class_id': 3, 'conf': 0.884213924407959, 'bbox': [64, 86, 1031, 464], 'text': 'TERRES\nDU SUD'}
+
+[Zone 2]:
+{'type': 'text', 'class_id': 0, 'conf': 0.7712720632553101, 'bbox': [1891, 134, 4078, 271], 'text': 'PLI 01 C070025 AR DIV 0041913 30.04.2024 0027'}
+
+[Zone 3]:
+{'type': 'text', 'class_id': 0, 'conf': 0.7731744647026062, 'bbox': [1917, 391, 2517, 544], 'text': 'FACTURE'}
+
+[Zone 4]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.8897868394851685, 'bbox': [1002, 443, 1843, 855], 'text': "PLACE DE L'HOTEL DE VILLE\n47320 CLAIRAC\n\nAgrément HCCA 11294\nTéléphone : 05.53.79.85.00\nwww.groupe-terresdusud.fr"}
+
+[Zone 5]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.838690459728241, 'bbox': [68, 448, 720, 758], 'text': 'TERRES DU SUD\nSociété coopérative agricole\nau capital variable\n\nRCS Agen 381 561 844\n\nN° TVA FR 87 381 561 844\nAPE ARO17'}
+
+[Zone 6]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.8377236127853394, 'bbox': [93, 1009, 1612, 1213], 'text': 'Emetteur: TERRES DU SUD\nSIREN 381561844 Pays FR\nTVA FR87381561844'}
+
+[Zone 7]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.883516252040863, 'bbox': [2009, 1169, 3167, 1592], 'text': 'GROUPE ECONOMIQUE AGRO ALIMENT\nPLACE DE L HOTEL DE VILLE\n47320 CLAIRAC'}
+
+[Zone 8]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.8102887868881226, 'bbox': [95, 1186, 1731, 1400], 'text': 'Récepteur : GROUPE ECONOMIQUE AGRO ALIMENT\nSIREN 397553660 Pays FR\nTVA FR14397553660 Compte 70025'}
+
+[Zone 9]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.7616342902183533, 'bbox': [88, 1370, 1743, 1527], 'text': 'Date 30/04/2024 Document 0041913\nCatégorie LBPS Page 1'}
+
+[Zone 10]:
+{'type': 'table', 'class_id': 2, 'conf': 0.8820018172264099, 'bbox': [120, 1791, 4062, 2692], 'text': 'T\nPRIX UNIT. MONTANT\nREFACTURATION ONEPOINT 1,00 1039, 73 1039,73 13\nFC N°112317800 DU 24/11/23\nFRAIS PARTICIPATION SEMINAIRE'}
+
+[Zone 11]:
+{'type': 'table', 'class_id': 2, 'conf': 0.9487747550010681, 'bbox': [2390, 4660, 4101, 5366], 'text': '20,00 1039,73 207,95 1247,68\nFACTURE 1039,73 || 207,95 1247,68'}
+
+[Zone 12]:
+{'type': 'table', 'class_id': 2, 'conf': 0.8357797265052795, 'bbox': [614, 4664, 2327, 4921], 'text': '57 VIREMENT BANCAIRE 31.05.2024 1247.68'}
+
+[Zone 13]:
+{'type': 'table', 'class_id': 2, 'conf': 0.7600336670875549, 'bbox': [90, 4666, 562, 4893], 'text': 'TOTAL QUANTITE'}
+
+[Zone 14]:
+{'type': 'text-column', 'class_id': 1, 'conf': 0.8712339401245117, 'bbox': [96, 5346, 1760, 5585], 'text': 'REGLEMENT : TERRES DU SUD\nFR76 1330 6001 5796 9085 1201 154 CRCA AQUITAINE\nBIC : AGRIFRPP833'}
+
+[Zone 15]:
+{'type': 'text', 'class_id': 0, 'conf': 0.753945529460907, 'bbox': [2801, 5396, 4106, 5533], 'text': 'TTC Euros 1247,68'}
+
+[Zone 16]:
+{'type': 'text', 'class_id': 0, 'conf': 0.818812370300293, 'bbox': [95, 5638, 3782, 5920], 'text': "TVA payée sur les débits\nLe transfert à l'acheteur de la propriété des biens vendus et figurant sur le présent document est suspendu jusqu'au paiement intégral du prix en principal et intérêts et ne sera réalisé que lors de l'encaissement effectif du prix.\nLe paiement de nos factures s'effectue à 30 jours fin de mois, suivant le mois de l'émission de la facture. Toute somme non payée à son échéance entraînera le paiement d'une pénalité de retard ne pouvant être inférieur à 3 fois\nle taux de l'intérêt légal par an, sans besoin d'aucune mise en demeure ni autre rappel. Pour tout retard de paiement au delà de la date d'échéance, une indemnité forfaitaire pour frais de recouvrement de 40 Euros sera due de\nplein droit et des frais financiers avec intérêts de retard au taux de 1 % par mois seront décomptés et feront l'objet d'une capitalisation.\n\nn cas de litige, l'attribution de compétence est faite aux Tribunaux de notre siège social. Aucun escompte pour paiement anticipé."}
+

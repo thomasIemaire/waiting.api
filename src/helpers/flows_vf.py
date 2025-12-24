@@ -11,11 +11,79 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 from datetime import datetime
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Dict, Literal, Optional, Union
+from collections.abc import Mapping, Sequence
+
+
+import warnings
+
+# ========= Hugging Face cache / warnings =========
+def configure_hf_cache(cache_dir: str | None = None, *, debug: bool = False) -> str:
+    """Configure un cache Hugging Face stable (évite les re-téléchargements entre runs).
+
+    Priorité:
+      1) param cache_dir
+      2) env SARDINE_HF_CACHE
+      3) env HF_HOME (si déjà défini)
+      4) défaut: ~/.cache/huggingface
+    """
+    if cache_dir is None:
+        cache_dir = (
+            os.getenv("SARDINE_HF_CACHE")
+            or os.getenv("HF_HOME")
+            or os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+        )
+
+    cache_dir = os.path.abspath(cache_dir)
+
+    # Ne remplace pas une config existante, sauf si SARDINE_HF_CACHE est explicitement fourni
+    if os.getenv("SARDINE_HF_CACHE"):
+        os.environ["HF_HOME"] = cache_dir
+        os.environ["HF_HUB_CACHE"] = os.path.join(cache_dir, "hub")
+        os.environ["TRANSFORMERS_CACHE"] = os.path.join(cache_dir, "transformers")
+    else:
+        os.environ.setdefault("HF_HOME", cache_dir)
+        os.environ.setdefault("HF_HUB_CACHE", os.path.join(cache_dir, "hub"))
+        os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(cache_dir, "transformers"))
+
+    # Optionnel: éviter la télémétrie
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+    if debug:
+        print(f"[INFO] HF cache dir (requested): {cache_dir}")
+        try:
+            from huggingface_hub import constants as hf_consts  # import après config env
+            print(f"[INFO] Resolved HF_HOME     : {hf_consts.HF_HOME}")
+            print(f"[INFO] Resolved HF_HUB_CACHE: {hf_consts.HF_HUB_CACHE}")
+        except Exception as e:
+            print(f"[INFO] huggingface_hub not available yet: {e}")
+
+    return cache_dir
+
+
+def configure_hf_warnings(*, silence: bool = False) -> None:
+    """Masque 2 warnings très fréquents (optionnel)."""
+    if not silence:
+        return
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*`resume_download` is deprecated.*",
+        category=FutureWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*byte fallback option.*not implemented.*fast tokenizers.*",
+        category=UserWarning,
+    )
+
+# IMPORTANT: configurer AVANT tout import de transformers/gliner
+configure_hf_cache()
+configure_hf_warnings(silence=os.getenv("SARDINE_SILENCE_HF_WARNINGS", "0") == "1")
 
 from PIL import Image, ImageFilter, ImageOps
 
-# Optional / heavy deps (le flow de démo ne les utilise pas)
+start_import_time = time.time()
 try:
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover
@@ -36,14 +104,22 @@ try:
 except Exception:  # pragma: no cover
     YOLO = None  # type: ignore
 
+try:
+    from gliner import GLiNER
+except Exception:  # pragma: no cover
+    GLiNER = None  # type: ignore
+end_import_time = time.time()
+
 
 # ========= CONSTANTS =========
-FLOW_MAX_WORKERS = 4
-OCR_MAX_WORKERS = 4
+FLOW_MAX_WORKERS = 8
+OCR_MAX_WORKERS = 24
 
 _YOLO_CACHE: dict[str, Any] = {}
 _YOLO_LOCK = threading.Lock()
 
+_AGENT_CACHE: dict[str, dict[str, Any]] = {}
+_AGENT_LOCK = threading.Lock()
 
 def _require(dep: Any, name: str) -> None:
     if dep is None:
@@ -70,6 +146,25 @@ _BRACED_PATH_RE = re.compile(r"\$\{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\}")
 _DOLLAR_PATH_RE = re.compile(r"\$([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
 _DATAURL_RE = re.compile(r"data:(?P<mime>[\w/-]+)?(;base64)?,(?P<data>.+)", re.IGNORECASE)
 
+
+# ========= Database =========
+def get_db_connection() -> None:
+    mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/sardine")
+    if not mongo_uri:
+        print("MONGODB_URI environment variable is not set. Database connection will not be established.")
+        return
+    
+    try:
+        from pymongo import MongoClient
+
+        client = MongoClient(mongo_uri)
+        return client.get_default_database()
+    except Exception as e:
+        print(f"Failed to connect to MongoDB: {e}")
+        return None
+
+DB = get_db_connection()
+DB_AGENTS_COLLECTION = "agents"
 
 # ========= Helpers =========
 def print_debug(
@@ -373,7 +468,8 @@ def _ocr_pil_image(image: Image.Image, *, lang: str = "fra+eng", debug: bool = F
 
 
 def _ocr_many_pil(images: list[Image.Image], *, debug: bool = False) -> list[str]:
-    with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as ex:
+    max_workers = min(OCR_MAX_WORKERS, len(images))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_ocr_pil_image, c, debug=debug) for c in images]
         return [f.result() for f in futures]
 
@@ -422,49 +518,275 @@ def _predict_document_detection(
     *,
     debug: bool = False,
     padding: int = 8,
-) -> list[list[str]]:
+    fallback_full_page_ocr: bool = True,
+) -> tuple[list[list[dict[str, Any]]], float, float]:
     _require(np, "numpy")
 
     model_det = get_cached_yolo_model(model_path, debug=debug)
 
     try:
-        det_results = model_det.predict(source=images, save=False, conf=conf, device=device, verbose=False)
+        start_detection = time.time()
+        det_results = model_det.predict(
+            source=images, save=False, conf=conf, device=device, verbose=False
+        )
+        end_detection = time.time()
+        duration_detection = end_detection - start_detection
+        print_debug(f"[SARDINE] Document detection completed in {duration_detection:.2f}s", debug, tags=["SARDINE", "DETECT"])
     except Exception as e:
         print_debug(f"[SARDINE] Document detection failed: {e}", debug, tags=["SARDINE", "DETECT"])
         return []
 
-    output: list[list[str]] = []
+    start_ocr = time.time()
+
+    output: list[list[dict[str, Any]]] = []
+
+    default_names = {0: "text", 1: "text-column", 2: "table", 3: "logo", 4: "signature"}
 
     for img, res in zip(images, det_results):
-        page_output: list[str] = []
+        page_items: list[dict[str, Any]] = []
         W, H = img.size
 
-        if getattr(res, "boxes", None) is not None and len(res.boxes) > 0:
-            xyxy = res.boxes.xyxy
+        names = getattr(res, "names", None) or getattr(model_det, "names", None) or default_names
+
+        boxes = getattr(res, "boxes", None)
+        if boxes is not None and len(boxes) > 0:
+            xyxy = boxes.xyxy
+            cls = boxes.cls
+            confs = getattr(boxes, "conf", None)
+
+            # to numpy
             xyxy = xyxy.cpu().numpy() if hasattr(xyxy, "cpu") else xyxy.numpy()
+            cls = cls.cpu().numpy() if hasattr(cls, "cpu") else cls.numpy()
+            confs_np = None
+            if confs is not None:
+                confs_np = confs.cpu().numpy() if hasattr(confs, "cpu") else confs.numpy()
+
             xyxy = xyxy.astype(int)
-            order = np.lexsort((xyxy[:, 0], xyxy[:, 1]))  # type: ignore[union-attr]
+            cls = cls.astype(int)
+
+            order = np.lexsort((xyxy[:, 0], xyxy[:, 1]))
             xyxy = xyxy[order]
+            cls = cls[order]
+            if confs_np is not None:
+                confs_np = confs_np[order]
 
             crops: list[Image.Image] = []
-            for (x1, y1, x2, y2) in xyxy:
+            meta: list[tuple[int, int, int, int, int, float | None]] = []
+            for i, (x1, y1, x2, y2) in enumerate(xyxy):
                 x1p, y1p = max(0, x1 - padding), max(0, y1 - padding)
                 x2p, y2p = min(W, x2 + padding), min(H, y2 + padding)
                 if x2p > x1p and y2p > y1p:
                     crops.append(img.crop((x1p, y1p, x2p, y2p)))
+                    c = int(cls[i])
+                    cconf = float(confs_np[i]) if confs_np is not None else None
+                    meta.append((x1p, y1p, x2p, y2p, c, cconf))
 
             if crops:
                 texts = _ocr_many_pil(crops, debug=debug)
-                page_output = [t.strip() for t in texts if t is not None]
+                for (x1p, y1p, x2p, y2p, c, cconf), t in zip(meta, texts):
+                    zone_type = names.get(c, str(c)) if isinstance(names, dict) else str(c)
+                    page_items.append(
+                        {
+                            "type": zone_type,
+                            "class_id": c,
+                            "conf": cconf,
+                            "bbox": [x1p, y1p, x2p, y2p],
+                            "text": (t or "").strip(),
+                        }
+                    )
 
-        if not page_output:
+        if fallback_full_page_ocr and not page_items:
             full_text = _ocr_pil_image(img, debug=debug)
             if full_text:
-                page_output.append(full_text)
+                page_items.append(
+                    {
+                        "type": "page",
+                        "class_id": None,
+                        "conf": None,
+                        "bbox": [0, 0, W, H],
+                        "text": full_text.strip(),
+                    }
+                )
 
-        output.append(page_output)
+        output.append(page_items)
 
+    end_ocr = time.time()
+    duration_ocr = end_ocr - start_ocr
+    print_debug(f"[SARDINE] OCR on detected zones completed in {duration_ocr:.2f}s", debug, tags=["SARDINE", "DETECT"])
+
+    return output, duration_detection, duration_ocr
+
+
+def _clean_detection_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip()
+    return text
+
+
+# ========= Agent Utilities =========
+def get_cached_agent_model(
+        reference: str,
+        version: str = "latest",
+        *,
+        debug: bool = False
+) -> Any:
+    print_debug(f"Loading agent model: {reference} (version: {version})", debug, tags=["AGENT", "MODEL"])
+    
+    key_cache = f"{reference}::{version}"
+    if key_cache in _AGENT_CACHE:
+        print_debug(f"Using cached agent model for: {key_cache}", debug, tags=["AGENT", "MODEL"])
+        model, agent = _AGENT_CACHE[key_cache]["model"], _AGENT_CACHE[key_cache]["agent"]
+        return model, agent
+    
+    agent = get_agent_config(reference, version=version, debug=debug)
+    if not agent or not isinstance(agent, dict):
+        raise ValueError(f"Agent model not found or invalid: {reference} (version: {version})")
+    
+    version = agent.get("version") if version == "latest" else version
+    key_cache = f"{reference}::{version}"
+
+    model_path = agent.get("path", "")
+    if not model_path:
+        raise ValueError(f"Agent model path missing for: {reference} (version: {version})")
+
+    model_mapper = agent.get("mapper", None)
+    if model_mapper is None:
+        raise ValueError(f"Agent model mapper missing for: {reference} (version: {version})")
+
+    model_mapper = transform_mapper(model_mapper, debug=debug)
+    agent["transformed_mapper"] = model_mapper
+    agent["labels"] = list(model_mapper.keys())
+    
+    with _AGENT_LOCK:
+        if key_cache not in _AGENT_CACHE:
+            print_debug(f"Loading agent model into cache: {key_cache}", debug, tags=["AGENT", "MODEL"])
+            _AGENT_CACHE[key_cache] = {"model": GLiNER.from_pretrained(model_path), "agent": agent }
+
+    model, agent = _AGENT_CACHE[key_cache]["model"], _AGENT_CACHE[key_cache]["agent"]
+    return model, agent
+
+
+def get_agent_config(
+    reference: str,
+    version: str = "latest",
+    *,
+    debug: bool = False
+) -> Any:
+    if DB is None:
+        print_debug("Database connection is not available.", debug, tags=["AGENT", "CONFIG", "ERROR"])
+        return None
+
+    col = DB[DB_AGENTS_COLLECTION]
+
+    try:
+        if version != "latest":
+            return col.find_one({"reference": reference, "version": version})
+
+        cursor = col.find({"reference": reference}).sort("version", -1).limit(1)
+        return next(cursor, None)
+
+    except Exception as e:
+        print_debug(f"Failed to fetch agent config: {e}", debug, tags=["AGENT", "CONFIG", "ERROR"])
+        return None
+
+
+def transform_mapper(
+        mapper: dict,
+        *,
+        debug: bool = False
+) -> dict:
+    output: dict[str, str] = {}
+
+    def walk(obj, path: str):
+        if isinstance(obj, Mapping):
+            for k, v in obj.items():
+                k_str = str(k)
+                new_path = f"{path}.{k_str}" if path else k_str
+                walk(v, new_path)
+            return
+
+        if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+            for i, v in enumerate(obj):
+                walk(v, f"{path}[{i}]")
+            return
+
+        if not isinstance(obj, str):
+            print_debug(f"Mapper value at path '{path}' is not a string: {obj}", debug, tags=["AGENT", "MAPPER", "WARNING"])
+            return
+
+        if obj in output:
+            print_debug(f"Duplicate mapper label found: {obj} (existing path: {output[obj]}, new path: {path})", debug, tags=["AGENT", "MAPPER", "WARNING"])
+            return
+
+        output[obj] = path
+
+    walk(mapper, "")
     return output
+
+
+def _predict_agent(
+        text: str,
+        model: Any,
+        agent: dict,
+        *,
+        conf: float = 0.5,
+        debug: bool = False
+) -> tuple[bool, list[Dict[str, Any]]]:
+    model_labels = agent.get("labels", [])
+    if not model_labels:
+        print_debug(f"No labels defined in agent config", debug, tags=["AGENT", "PREDICT", "ERROR"])
+        return False, []
+    
+    output: list[Dict[str, Any]] = []
+
+    try:
+        entities = model.predict_entities(text, labels=model_labels, threshold=conf)
+        for ent in entities:
+            start, end = ent["start"], ent["end"]
+            label, score = ent["label"], ent["score"] or 0.0 
+            output.append({
+                "label": label,
+                "start": start,
+                "end": end,
+                "score": score,
+                "value": text[start:end],
+            })
+    except Exception as e:
+        print_debug(f"Agent prediction failed: {e}", debug, tags=["AGENT", "PREDICT", "ERROR"])
+        return False, []
+    
+    return True, output
+
+
+def best_entities_by_label(
+    agent_output: list[list[Dict[str, Any]]],
+    *,
+    debug: bool = False
+) -> dict[str, Dict[str, Any]]:
+    best_entities: dict[str, Dict[str, Any]] = {}
+    for page in agent_output:
+        for ent in page:
+            label = ent.get("label", "")
+            score = ent.get("score", 0.0)
+            if label not in best_entities or score > best_entities[label].get("score", 0.0):
+                best_entities[label] = ent
+    return best_entities
+
+
+def map_agent_output(
+    agent_output: list[Dict[str, Any]],
+    model_mapper: dict[str, str],
+    *,
+    debug: bool = False
+) -> dict:
+    mapped_output: dict = {}
+    for item in agent_output:
+        label = item.get("label", "")
+        value = item.get("value", "")
+        if label in model_mapper:
+            key_path = model_mapper[label]
+            set_value_at_path(mapped_output, key_path, value)
+    return mapped_output
 
 
 # ========= Node Utilities =========
@@ -533,14 +855,11 @@ def process_node(
         debug=debug,
         images=images,
         texts=texts,
+        node_id=node_id
     )
 
-    # Root-wrapping (optionnel)
     wrapped_output = output if not node_root else {node_root: output}
 
-    time.sleep(0.1)
-
-    # Debug timings (dans le contexte global)
     end = time.time()
     set_value_at_path(input_ctx, f"_debug.nodes.{node_id}.duration", end - start)
     print_debug(f"END Processing {node_id} (Duration: {end - start:.2f}s)", debug, tags=["NODE", "INFO"])
@@ -554,6 +873,7 @@ def execute_node_by_type(
     base64_data: Any,
     *,
     debug: bool = False,
+    node_id: Optional[str] = None,
     images: Optional[list[Image.Image]] = None,
     texts: Optional[list[list[str]]] = None,
 ) -> tuple[bool, list[str], dict, list[Image.Image], list[list[str]]]:
@@ -604,14 +924,21 @@ def execute_node_by_type(
 
         case "sardine":
             status, images, output = node_sardine(node, input_ctx, base64_data, debug=debug, images=images)
-            children_raw = get_node_children(node)
-            children_ids = list(children_raw) if isinstance(children_raw, list) else []
+            children_ids = get_node_children(node)["valid"] if images else get_node_children(node)["invalid"]
 
         case "zone-detection":
-            status, images, detections = node_detection(node, input_ctx, base64_data, debug=debug, images=images)
+            status, images, detections = node_detection(node, input_ctx, base64_data, node_id=node_id, debug=debug, images=images)
             texts = detections
             children_raw = get_node_children(node)
             children_ids = list(children_raw) if isinstance(children_raw, list) else []
+
+        case "agent":
+            status, output = node_agent(
+                node,
+                texts,
+                debug=debug,
+            )
+            children_ids = get_node_children(node)
 
         case "debug":
             import random
@@ -825,6 +1152,7 @@ def node_detection(
     input_ctx: dict,
     base64_data: Any,
     *,
+    node_id: Optional[str] = None,
     debug: bool = False,
     images: Optional[list[Image.Image]] = None,
 ) -> tuple[bool, list[Image.Image], list[list[str]]]:
@@ -846,7 +1174,7 @@ def node_detection(
     conf: float = float(node_config.get("confidence_threshold", 0.25))
 
     try:
-        detections = _predict_document_detection(
+        detections, det_dur, ocr_dur = _predict_document_detection(
             images,
             model_path=model_path,
             device=device,
@@ -854,10 +1182,80 @@ def node_detection(
             debug=debug,
             padding=zone_padding,
         )
-        return True, images, detections
+
+        set_value_at_path(input_ctx, f"_debug.nodes.{node_id}.ocr_duration", ocr_dur)
+        set_value_at_path(input_ctx, f"_debug.nodes.{node_id}.detection_duration", det_dur)
+
+        exclusion_types = ["logo", "signature"]
+        detections_clean = [
+            [
+                _clean_detection_text(text.get("text")) 
+                    for text in page_detections 
+                    if text.get("type") not in exclusion_types
+            ]
+            for page_detections in detections
+        ]
+
+        return True, images, detections_clean
     except Exception as e:
         print_debug(f"Document detection failed: {e}", debug, tags=["NODE", "DETECTION", "ERROR"])
         return False, images, []
+
+
+def node_agent(
+    node: dict,
+    texts: list[list[str]],
+    *,
+    debug: bool = False,
+) -> tuple[bool, dict]:
+    if not texts:
+        print_debug("No texts provided to Agent node.", debug, tags=["NODE", "AGENT", "ERROR"])
+        return False, {}
+    
+    node_config = get_node_config(node)
+
+    model = node_config.get("model", None)
+    if not model:
+        print_debug("No model specified for Agent node.", debug, tags=["NODE", "AGENT", "ERROR"])
+        return False, {}
+
+    version = node_config.get("version", "latest")
+    processing_mode = node_config.get("processing_mode", "per_zone") # "all_at_once" or "per_zone"
+
+    if processing_mode == "all_at_once":
+        texts = [[" \n ".join(page_texts)] for page_texts in texts]
+
+    try:
+        model, agent = get_cached_agent_model(model, version=version, debug=debug)
+    except Exception as e:
+        print_debug(f"Failed to load agent model: {e}", debug, tags=["NODE", "AGENT", "ERROR"])
+        return False, {}
+
+    entities_accumulated: list[list[Dict[str, Any]]] = []
+
+    for p in texts:
+        for text in p:
+            status, agent_output = _predict_agent(
+                text,
+                model,
+                agent,
+                conf=float(node_config.get("confidence_threshold", 0.5)),
+                debug=debug,
+            )
+
+            if not status or not agent_output:
+                continue
+
+            entities_accumulated.append(agent_output)
+
+    transformed_mapper = agent.get("transformed_mapper")
+    best_entities = best_entities_by_label(entities_accumulated, debug=debug)
+    best_entities_list = list(best_entities.values())
+    mapped_output = map_agent_output(best_entities_list, transformed_mapper, debug=debug)
+
+    print_debug(f"Agent node completed successfully. {mapped_output}", debug, tags=["NODE", "AGENT", "INFO"])
+
+    return True, mapped_output
 
 
 # ========= Flow Utilities =========
@@ -992,6 +1390,8 @@ def run(flow: dict, base64_data: Any, *, debug: bool = False) -> dict:
 
 
 if __name__ == "__main__":
+    print(f"[INFO] Sardine Flow Engine Module Test; Time to import: {end_import_time - start_import_time:.2f}s")
+
     test_flow = {
         "start": {"id": "start", "type": "start", "outputs": ["node_A", "node_B"]},
 
@@ -1063,30 +1463,22 @@ if __name__ == "__main__":
         "node_END_DEFAULT": {"id": "node_END_DEFAULT", "type": "final", "inputs": ["node_DEFAULT"], "outputs": []},
     }
 
-    # # 1) Force la branche "match" (vat.number -> siren = 456789000)
-    # ctx_match = {"seller": {"vat": {"number": "FR000456789000"}}}
-    # print("=== MATCH ===")
-    # print(json.dumps(run(test_flow, ctx_match, debug=True), indent=2))
-
-    # # 2) Force la branche "default" (vat.number -> siren != 456789000)
-    # ctx_default = {"seller": {"vat": {"number": "FR000123456789"}}}
-    # print("=== DEFAULT ===")
-    # print(json.dumps(run(test_flow, ctx_default, debug=True), indent=2))
-
     # === Sardine -> Detection gating flow template ===
+    dpi = 768
     sardine_detection_flow = {
         "start": {"id": "start", "type": "start", "outputs": ["node_SARDINE"]},
 
-        # 1) Sardine: classify pages; if invoice => continue; else stop.
         "node_SARDINE": {
             "id": "node_SARDINE",
             "type": "sardine",
             "inputs": ["start"],
-            "outputs": ["node_DETECTION"],
+            "outputs": {
+                "valid": ["node_DETECTION"],
+                "invalid": ["node_END"],
+            },
             "config": {
                 "model_path": "C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\sardine.agents\\sard-cls\\best.pt",
-                # Classes that should be treated as "invoice"
-                "accepted_files": ["invoice"],
+                "accepted_files": ["facture"],
                 "stop_if_no_match": True,
                 "page_mode": "first_page_only",
                 "page_dpi": 512,
@@ -1094,15 +1486,14 @@ if __name__ == "__main__":
             },
         },
 
-        # 2) Detection: runs only if Sardine decided to continue
         "node_DETECTION": {
             "id": "node_DETECTION",
             "type": "zone-detection",
             "inputs": ["node_SARDINE"],
-            "outputs": ["node_END"],
+            "outputs": ["node_SIREN", "node_ADDRESS", "node_VAT"],
             "config": {
                 "model_path": "C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\sardine.agents\\sard-det\\best.pt",
-                "confidence_threshold": 0.25,
+                "confidence_threshold": 0.75,
                 "zone_padding": 8,
                 "page_mode": "first_page_only",
                 "page_dpi": 512,
@@ -1110,10 +1501,332 @@ if __name__ == "__main__":
             },
         },
 
-        "node_END": {"id": "node_END", "type": "final", "inputs": ["node_DETECTION"], "outputs": []},
+        "node_SIREN": {
+            "id": "node_SIREN",
+            "type": "agent",
+            "inputs": ["node_DETECTION"],
+            "outputs": ["node_END"],
+            "config": {
+                "model": "siren",
+                "version": "latest",
+                "processing_mode": "per_zone",
+            },
+        },
+
+        "node_ADDRESS": {
+            "id": "node_ADDRESS",
+            "type": "agent",
+            "inputs": ["node_DETECTION"],
+            "outputs": ["node_END"],
+            "config": {
+                "model": "address",
+                "version": "latest",
+                "processing_mode": "per_zone",
+            },
+        },
+
+        "node_VAT": {
+            "id": "node_VAT",
+            "type": "agent",
+            "inputs": ["node_DETECTION"],
+            "outputs": ["node_END"],
+            "config": {
+                "model": "vat-number",
+                "version": "latest",
+                "processing_mode": "per_zone",
+            },
+        },
+
+        "node_END": {"id": "node_END", "type": "final", "inputs": ["node_SARDINE", "node_SIREN", "node_ADDRESS", "node_VAT"], "outputs": []},
     }
     print("=== Sardine -> Detection flow template is available in variable: sardine_detection_flow ===")
-    with open("C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\invoices\\facture_002-1.txt", "r") as file:
-        file_content = file.read()
-    print(json.dumps(run(sardine_detection_flow, file_content, debug=True), indent=2))
-    print(json.dumps(run(sardine_detection_flow, file_content, debug=True), indent=2))
+
+    files_to_test_ok = [
+        # "facture_001-1",
+        # "facture_002-1",
+        # "facture_003-2",
+        "FACTDVX_01_TERRESDUSUD",
+        "9472_Facture_TransportsCombemale_001",
+        # "8787_Facture_SocieteNouvelleDeMateriaux_001",
+        # "2024071184",
+        # "F2024-09-30",
+        # "DIPRES_20241004",
+        # "FACT33481-1"
+    ]
+
+    files_to_test_nok = [
+        "bulletin_de_paie",
+        "5e7f689f-051c-41ca-b067-bb2a387cdf8f"
+    ]
+
+    BASE_DIR_OK = r"C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\invoices"
+    BASE_DIR_NOK = r"C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\invoices"
+
+    def _get_flow_duration(res: dict) -> float:
+        flow_dbg = res.get("_debug", {}).get("flow", {})
+        return float(flow_dbg.get("total_node_duration", flow_dbg.get("duration", 0.0)) or 0.0)
+
+    def _get_node_duration(res: dict, node_id: str) -> float | None:
+        nodes_dbg = res.get("_debug", {}).get("nodes", {})
+        d = nodes_dbg.get(node_id, {}).get("duration", None)
+        ocr_d = nodes_dbg.get(node_id, {}).get("ocr_duration", None)
+        det_d = nodes_dbg.get(node_id, {}).get("detection_duration", None)
+        return float(d) if d is not None else None, float(ocr_d) if ocr_d is not None else None, float(det_d) if det_d is not None else None
+
+    # --- stats cumulées
+    stats = {
+        "node_count": len(files_to_test_ok) + len(files_to_test_nok),
+        "node_count_ok": len(files_to_test_ok),
+        "node_count_nok": len(files_to_test_nok),
+
+        "total_node_duration": 0.0,
+        "total_node_duration_ok": 0.0,
+        "total_node_duration_nok": 0.0,
+
+        "average_node_duration": 0.0,
+        "average_node_duration_ok": 0.0,
+        "average_node_duration_nok": 0.0,
+    }
+
+    node_stats = {
+        "node_SARDINE": {"sum": 0.0, "count": 0, "avg": 0.0},
+        "node_DETECTION": {"sum": 0.0, "count": 0, "avg": 0.0},
+    }
+
+    node_substats = {
+        "node_DETECTION_OCR": {"sum": 0.0, "count": 0, "avg": 0.0},
+        "node_DETECTION_DET": {"sum": 0.0, "count": 0, "avg": 0.0},
+    }
+
+    # --- historiques pour graphes (x = numéro du test)
+    x_all, y_all, y_all_avg = [], [], []
+    x_ok, y_ok, y_ok_avg = [], [], []
+    x_nok, y_nok, y_nok_avg = [], [], []
+
+    history = []  # optionnel : log structuré par test
+
+    test_idx = 0
+    ok_seen = 0
+    nok_seen = 0
+
+    def _update_avgs():
+        if test_idx > 0:
+            stats["average_node_duration"] = stats["total_node_duration"] / test_idx
+        if ok_seen > 0:
+            stats["average_node_duration_ok"] = stats["total_node_duration_ok"] / ok_seen
+        if nok_seen > 0:
+            stats["average_node_duration_nok"] = stats["total_node_duration_nok"] / nok_seen
+
+    def _run_one(file_name: str, label: str, base_dir: str):
+        global test_idx, ok_seen, nok_seen
+
+        print(f"\n--- Testing {label.upper()} file: {file_name} ---")
+        with open(fr"{base_dir}\{file_name}.txt", "r", encoding="utf-8") as f:
+            file_content = f.read()
+
+        res = run(sardine_detection_flow, file_content, debug=True)
+
+        flow_dur = _get_flow_duration(res)
+        sard_dur, _, _ = _get_node_duration(res, "node_SARDINE")
+        det_g_dur, ocr_dur, det_dur = _get_node_duration(res, "node_DETECTION")
+
+        # --- totals global
+        test_idx += 1
+        stats["total_node_duration"] += flow_dur
+
+        if label == "ok":
+            ok_seen += 1
+            stats["total_node_duration_ok"] += flow_dur
+        else:
+            nok_seen += 1
+            stats["total_node_duration_nok"] += flow_dur
+
+        _update_avgs()
+
+        # --- séries globales pour graphes
+        x_all.append(test_idx)
+        y_all.append(flow_dur)
+        y_all_avg.append(stats["average_node_duration"])
+
+        if label == "ok":
+            x_ok.append(ok_seen)
+            y_ok.append(flow_dur)
+            y_ok_avg.append(stats["average_node_duration_ok"])
+        else:
+            x_nok.append(nok_seen)
+            y_nok.append(flow_dur)
+            y_nok_avg.append(stats["average_node_duration_nok"])
+
+        # --- node averages cumulées (on n’incrémente que si la node a tourné)
+        def upd_node(node_id: str, dur: float | None):
+            if dur is None:
+                return None
+            node_stats[node_id]["sum"] += dur
+            node_stats[node_id]["count"] += 1
+            node_stats[node_id]["avg"] = node_stats[node_id]["sum"] / node_stats[node_id]["count"]
+            return node_stats[node_id]["avg"]
+        
+        def upd_sub(node_key: str, dur: float | None):
+            if dur is None:
+                return None
+            node_substats[node_key]["sum"] += dur
+            node_substats[node_key]["count"] += 1
+            node_substats[node_key]["avg"] = node_substats[node_key]["sum"] / node_substats[node_key]["count"]
+            return node_substats[node_key]["avg"]
+
+        sard_avg = upd_node("node_SARDINE", sard_dur)
+        det_avg  = upd_node("node_DETECTION", det_g_dur)
+        det_ocr_avg = upd_sub("node_DETECTION_OCR", ocr_dur)
+        det_det_avg = upd_sub("node_DETECTION_DET", det_dur)
+
+        history.append({
+            "test_idx": test_idx,
+            "file": file_name,
+            "label": label,
+
+            "flow_duration": flow_dur,
+            "flow_avg_total": stats["average_node_duration"],
+            "flow_avg_ok": stats["average_node_duration_ok"],
+            "flow_avg_nok": stats["average_node_duration_nok"],
+
+            "node_SARDINE_duration": sard_dur,
+            "node_SARDINE_avg": sard_avg,        # moyenne cumulée sur les runs où la node existe
+            "node_DETECTION_duration": det_g_dur,
+            "node_DETECTION_avg": det_avg,       # idem (souvent absent sur NOK)
+
+            "tot_total": stats["total_node_duration"],
+            "tot_ok": stats["total_node_duration_ok"],
+            "tot_nok": stats["total_node_duration_nok"],
+
+            "node_DETECTION_ocr_duration": ocr_dur,
+            "node_DETECTION_ocr_avg": det_ocr_avg,
+
+            "node_DETECTION_det_duration": det_dur,
+            "node_DETECTION_det_avg": det_det_avg,
+        })
+
+        return res
+
+    # --- exécution OK puis NOK (ou mélange si tu préfères)
+    for fn in files_to_test_ok:
+        print(json.dumps(_run_one(fn, "ok", BASE_DIR_OK), indent=2))
+
+    for fn in files_to_test_nok:
+        _run_one(fn, "nok", BASE_DIR_NOK)
+
+    print("\n=== Final stats ===")
+    print(json.dumps(stats, indent=2))
+    print("\n=== Node stats ===")
+    print(json.dumps(merge_dicts(node_stats, node_substats), indent=2))
+
+    import matplotlib.pyplot as plt
+
+    def plot_bench_with_nodes(history, out_dir="."):
+        ok_hist = [h for h in history if h.get("label") == "ok"]
+
+        # Helper: 1 figure = 2 courbes (durée + moyenne cumulée)
+        def plot_two_curves(x1, y1, x2, y2, title, xlabel, ylabel, filename,
+                            label1="Durée", label2="Moyenne cumulée"):
+            plt.figure()
+            if x1 and y1:
+                plt.plot(x1, y1, marker="o", label=label1)
+            if x2 and y2:
+                plt.plot(x2, y2, marker="o", label=label2)
+            plt.title(title)
+            plt.xlabel(xlabel)
+            plt.ylabel(ylabel)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(f"{out_dir}/{filename}", dpi=160)
+            plt.close()
+
+        # ---------------- Flow (OK only)
+        x_ok_idx    = list(range(1, len(ok_hist) + 1))  # 1..N_OK
+        flow_y_ok   = [h["flow_duration"] for h in ok_hist]
+        flow_avg_ok = [h["flow_avg_ok"] for h in ok_hist]
+
+        plot_two_curves(
+            x_ok_idx, flow_y_ok,
+            x_ok_idx, flow_avg_ok,
+            title="Flow (OK only) - Durée & moyenne cumulée",
+            xlabel="Test OK #",
+            ylabel="Temps (s)",
+            filename="flow_duration_and_cumavg_OK.png",
+            label1="Durée par test",
+            label2="Moyenne cumulée"
+        )
+
+        # ---------------- node_SARDINE (OK only quand dispo)
+        sard_x = [h["test_idx"] for h in ok_hist if h.get("node_SARDINE_duration") is not None]
+        sard_y = [h["node_SARDINE_duration"] for h in ok_hist if h.get("node_SARDINE_duration") is not None]
+        sard_avg_x = [h["test_idx"] for h in ok_hist if h.get("node_SARDINE_avg") is not None]
+        sard_avg_y = [h["node_SARDINE_avg"] for h in ok_hist if h.get("node_SARDINE_avg") is not None]
+
+        plot_two_curves(
+            sard_x, sard_y,
+            sard_avg_x, sard_avg_y,
+            title="node_SARDINE - Durée & moyenne cumulée (OK only)",
+            xlabel="Test #",
+            ylabel="Temps (s)",
+            filename="node_sardine_duration_and_cumavg_OK.png",
+            label1="Durée",
+            label2="Moyenne cumulée"
+        )
+
+        # ---------------- node_DETECTION (runs où exécuté)
+        det_x = [h["test_idx"] for h in ok_hist if h.get("node_DETECTION_duration") is not None]
+        det_y = [h["node_DETECTION_duration"] for h in ok_hist if h.get("node_DETECTION_duration") is not None]
+        det_avg_x = [h["test_idx"] for h in ok_hist if h.get("node_DETECTION_avg") is not None]
+        det_avg_y = [h["node_DETECTION_avg"] for h in ok_hist if h.get("node_DETECTION_avg") is not None]
+
+        plot_two_curves(
+            det_x, det_y,
+            det_avg_x, det_avg_y,
+            title="node_DETECTION - Durée & moyenne cumulée (runs exécutés)",
+            xlabel="Test #",
+            ylabel="Temps (s)",
+            filename="node_detection_duration_and_cumavg.png",
+            label1="Durée",
+            label2="Moyenne cumulée"
+        )
+
+        # ---------------- DETECTION / OCR (OK only)
+        ocr_x = [h["test_idx"] for h in ok_hist if h.get("node_DETECTION_ocr_duration") is not None]
+        ocr_y = [h["node_DETECTION_ocr_duration"] for h in ok_hist if h.get("node_DETECTION_ocr_duration") is not None]
+        ocr_avg_x = [h["test_idx"] for h in ok_hist if h.get("node_DETECTION_ocr_avg") is not None]
+        ocr_avg_y = [h["node_DETECTION_ocr_avg"] for h in ok_hist if h.get("node_DETECTION_ocr_avg") is not None]
+
+        plot_two_curves(
+            ocr_x, ocr_y,
+            ocr_avg_x, ocr_avg_y,
+            title="node_DETECTION/OCR - Durée & moyenne cumulée (OK only)",
+            xlabel="Test #",
+            ylabel="Temps (s)",
+            filename="node_detection_ocr_duration_and_cumavg_OK.png",
+            label1="OCR durée",
+            label2="OCR moyenne cumulée"
+        )
+
+        # ---------------- DETECTION / DET (OK only)
+        det2_x = [h["test_idx"] for h in ok_hist if h.get("node_DETECTION_det_duration") is not None]
+        det2_y = [h["node_DETECTION_det_duration"] for h in ok_hist if h.get("node_DETECTION_det_duration") is not None]
+        det2_avg_x = [h["test_idx"] for h in ok_hist if h.get("node_DETECTION_det_avg") is not None]
+        det2_avg_y = [h["node_DETECTION_det_avg"] for h in ok_hist if h.get("node_DETECTION_det_avg") is not None]
+
+        plot_two_curves(
+            det2_x, det2_y,
+            det2_avg_x, det2_avg_y,
+            title="node_DETECTION/DET - Durée & moyenne cumulée (OK only)",
+            xlabel="Test #",
+            ylabel="Temps (s)",
+            filename="node_detection_det_duration_and_cumavg_OK.png",
+            label1="DET durée",
+            label2="DET moyenne cumulée"
+        )
+
+        plt.show()
+
+    # Utilisation :
+    plot_bench_with_nodes(history, out_dir=".")
+    print("Graphs saved: duration_per_test.png, cumulative_average.png, ok_vs_nok.png, sorted_durations.png")
