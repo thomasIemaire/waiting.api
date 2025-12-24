@@ -329,7 +329,7 @@ def extract_images_from_base64(
     )
 
     if not images:
-        print_debug("[SARDINE] No images extracted from base64 data.", debug, tags=["SARDINE", "EXTRACT_IMAGES"])
+        print_debug("No images extracted from base64 data.", debug, tags=["SARDINE", "EXTRACT_IMAGES"])
         return []
 
     return images
@@ -345,7 +345,7 @@ def load_images_from_base64(
     raw_bytes, mime = _try_decode_base64(base64_data)
 
     if raw_bytes is None:
-        print_debug("[SARDINE] No valid base64 data found.", debug, tags=["SARDINE", "LOAD_IMAGES"])
+        print_debug("No valid base64 data found.", debug, tags=["SARDINE", "LOAD_IMAGES"])
         return []
 
     try:
@@ -356,7 +356,7 @@ def load_images_from_base64(
             else [_load_pil_from_bytes(raw_bytes)]
         )
     except Exception as e:
-        print_debug(f"[SARDINE] Error loading images: {e}", debug, tags=["SARDINE", "LOAD_IMAGES"])
+        print_debug(f"Error loading images: {e}", debug, tags=["SARDINE", "LOAD_IMAGES"])
         return []
 
 
@@ -370,7 +370,7 @@ def _load_pil_from_pdf(
     try:
         import fitz  # type: ignore
     except ImportError:
-        print_debug("[SARDINE] fitz (PyMuPDF) library is not installed.", debug, tags=["SARDINE", "LOAD_PDF"])
+        print_debug("fitz (PyMuPDF) library is not installed.", debug, tags=["SARDINE", "LOAD_PDF"])
         return []
 
     images: list[Image.Image] = []
@@ -383,11 +383,11 @@ def _load_pil_from_pdf(
                 img_bytes = pix.tobytes()
                 img = _load_pil_from_bytes(img_bytes)
                 images.append(img)
-                print_debug(f"[SARDINE] Loaded page {page_num + 1}/{len(doc)}", debug, tags=["SARDINE", "LOAD_PDF"])
+                print_debug(f"Loaded page {page_num + 1}/{len(doc)}", debug, tags=["SARDINE", "LOAD_PDF"])
                 if page_mode == "first_page_only":
                     break
     except Exception as e:
-        print_debug(f"[SARDINE] Error loading PDF pages: {e}", debug, tags=["SARDINE", "LOAD_PDF"])
+        print_debug(f"Error loading PDF pages: {e}", debug, tags=["SARDINE", "LOAD_PDF"])
         return []
 
     return images
@@ -419,15 +419,15 @@ def get_cached_yolo_model(model_path: str, *, debug: bool = False) -> Any:
     _require(YOLO, "ultralytics")
 
     abs_path = os.path.abspath(model_path)
-    print_debug(f"[SARDINE] Loading YOLO model from: {abs_path}", debug, tags=["SARDINE", "YOLO"])
+    print_debug(f"Loading YOLO model from: {abs_path}", debug, tags=["SARDINE", "YOLO"])
 
     if abs_path in _YOLO_CACHE:
-        print_debug(f"[SARDINE] Using cached YOLO model for: {abs_path}", debug, tags=["SARDINE", "YOLO"])
+        print_debug(f"Using cached YOLO model for: {abs_path}", debug, tags=["SARDINE", "YOLO"])
         return _YOLO_CACHE[abs_path]
 
     with _YOLO_LOCK:
         if abs_path not in _YOLO_CACHE:
-            print_debug(f"[SARDINE] Loading YOLO model into cache: {abs_path}", debug, tags=["SARDINE", "YOLO"])
+            print_debug(f"Loading YOLO model into cache: {abs_path}", debug, tags=["SARDINE", "YOLO"])
             _YOLO_CACHE[abs_path] = YOLO(model_path)  # type: ignore[misc]
 
     return _YOLO_CACHE[abs_path]
@@ -441,7 +441,7 @@ def classify_pages(model_cls: Any, sources: list[Image.Image], device: str = "cp
             top1 = r.probs.top1
             name = r.names[top1]
         else:
-            print_debug("[SARDINE] No classification probabilities found.", debug, tags=["SARDINE", "CLASSIFY"])
+            print_debug("No classification probabilities found.", debug, tags=["SARDINE", "CLASSIFY"])
             name = "unknown"
         results.append(name)
     return results
@@ -452,7 +452,7 @@ def _predict_document_class(images: list[Image.Image], model_path: str, device: 
         model = get_cached_yolo_model(model_path, debug=debug)
         return classify_pages(model, images, device=device, debug=debug)
     except Exception as e:
-        print_debug(f"[SARDINE] Document classification failed: {e}", debug, tags=["SARDINE", "CLASSIFY"])
+        print_debug(f"Document classification failed: {e}", debug, tags=["SARDINE", "CLASSIFY"])
         return []
 
 
@@ -483,7 +483,7 @@ def _deskew_and_orient(image: Image.Image, *, debug: bool = False) -> Image.Imag
         if rotation and rotation % 360 != 0:
             image = image.rotate(360 - rotation, expand=True)
     except Exception as e:
-        print_debug(f"[SARDINE] Deskew and orient failed: {e}", debug, tags=["SARDINE", "OCR"])
+        print_debug(f"Deskew and orient failed: {e}", debug, tags=["SARDINE", "OCR"])
 
     return image
 
@@ -531,9 +531,9 @@ def _predict_document_detection(
         )
         end_detection = time.time()
         duration_detection = end_detection - start_detection
-        print_debug(f"[SARDINE] Document detection completed in {duration_detection:.2f}s", debug, tags=["SARDINE", "DETECT"])
+        print_debug(f"Document detection completed in {duration_detection:.2f}s", debug, tags=["SARDINE", "DETECT"])
     except Exception as e:
-        print_debug(f"[SARDINE] Document detection failed: {e}", debug, tags=["SARDINE", "DETECT"])
+        print_debug(f"Document detection failed: {e}", debug, tags=["SARDINE", "DETECT"])
         return []
 
     start_ocr = time.time()
@@ -612,7 +612,7 @@ def _predict_document_detection(
 
     end_ocr = time.time()
     duration_ocr = end_ocr - start_ocr
-    print_debug(f"[SARDINE] OCR on detected zones completed in {duration_ocr:.2f}s", debug, tags=["SARDINE", "DETECT"])
+    print_debug(f"OCR on detected zones completed in {duration_ocr:.2f}s", debug, tags=["SARDINE", "DETECT"])
 
     return output, duration_detection, duration_ocr
 
