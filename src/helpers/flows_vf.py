@@ -631,31 +631,40 @@ def get_cached_agent_model(
         debug: bool = False
 ) -> Any:
     print_debug(f"Loading agent model: {reference} (version: {version})", debug, tags=["AGENT", "MODEL"])
+
+    def get_cache(reference: str, version: str) -> tuple[Any, Any]:
+        key = f"{reference}::{version}"
+        if key in _AGENT_CACHE:
+            print_debug(f"Using cached agent model for: {key}", debug, tags=["AGENT", "MODEL"])
+            return _AGENT_CACHE[key]["model"], _AGENT_CACHE[key]["agent"], key
+        return None, None, key
     
-    key_cache = f"{reference}::{version}"
-    if key_cache in _AGENT_CACHE:
-        print_debug(f"Using cached agent model for: {key_cache}", debug, tags=["AGENT", "MODEL"])
-        model, agent = _AGENT_CACHE[key_cache]["model"], _AGENT_CACHE[key_cache]["agent"]
-        return model, agent
+    if version != "latest":
+        model, agent, key_cache = get_cache(reference, version)
+        if model is not None and agent is not None:
+            return model, agent
     
     agent = get_agent_config(reference, version=version, debug=debug)
     if not agent or not isinstance(agent, dict):
         raise ValueError(f"Agent model not found or invalid: {reference} (version: {version})")
     
-    version = agent.get("version") if version == "latest" else version
-    key_cache = f"{reference}::{version}"
-
-    model_path = agent.get("path", "")
-    if not model_path:
-        raise ValueError(f"Agent model path missing for: {reference} (version: {version})")
-
     model_mapper = agent.get("mapper", None)
     if model_mapper is None:
         raise ValueError(f"Agent model mapper missing for: {reference} (version: {version})")
 
+    version = agent.get("version") if version == "latest" else version
     model_mapper = transform_mapper(model_mapper, debug=debug)
     agent["transformed_mapper"] = model_mapper
     agent["labels"] = list(model_mapper.keys())
+
+    if version != "latest":
+        model, _, key_cache = get_cache(reference, version)
+        if model is not None:
+            return model, agent
+
+    model_path = agent.get("path", "")
+    if not model_path:
+        raise ValueError(f"Agent model path missing for: {reference} (version: {version})")
     
     with _AGENT_LOCK:
         if key_cache not in _AGENT_CACHE:
@@ -727,20 +736,19 @@ def transform_mapper(
 def _predict_agent(
         text: str,
         model: Any,
-        agent: dict,
+        labels: list[str],
         *,
         conf: float = 0.5,
         debug: bool = False
 ) -> tuple[bool, list[Dict[str, Any]]]:
-    model_labels = agent.get("labels", [])
-    if not model_labels:
-        print_debug(f"No labels defined in agent config", debug, tags=["AGENT", "PREDICT", "ERROR"])
+    if not labels:
+        print_debug(f"No labels provided for prediction", debug, tags=["AGENT", "PREDICT", "ERROR"])
         return False, []
     
     output: list[Dict[str, Any]] = []
 
     try:
-        entities = model.predict_entities(text, labels=model_labels, threshold=conf)
+        entities = model.predict_entities(text, labels=labels, threshold=conf)
         for ent in entities:
             start, end = ent["start"], ent["end"]
             label, score = ent["label"], ent["score"] or 0.0 
@@ -773,6 +781,58 @@ def best_entities_by_label(
     return best_entities
 
 
+def check_entities_by_label(
+        agent_output: list[list[Dict[str, Any]]],
+        required_labels: Dict[str, Any],
+        *,
+        debug: bool = False
+) -> list[list[Dict[str, Any]]]:
+    output: list[list[Dict[str, Any]]] = []
+    for page in agent_output:
+        page_entities: list[Dict[str, Any]] = []
+        for ent in page:
+            print_debug(f"Checking entity: {ent}", debug, tags=["AGENT", "CHECK"])
+            label = ent.get("label", "")
+            value = ent.get("value", "")
+            if label not in required_labels or \
+               (label in required_labels and not required_labels[label]) or \
+               (label in required_labels and required_labels[label] and is_valid_entity(value, required_labels[label], debug=debug)):
+                page_entities.append(ent)        
+        output.append(page_entities)
+    print_debug(f"Checked entities output: {output}", debug, tags=["AGENT", "CHECK"])
+    return output
+
+
+def is_interesting_zone(
+        text: str,
+        patterns: list[str],
+        *,
+        debug: bool = False
+) -> bool:
+    for pattern in patterns:
+        if re.search(pattern, text):
+            return True
+    return False
+
+
+def is_valid_entity(
+        value: Any,
+        constraints: list[Dict[str, Any]],
+        *,
+        debug: bool = False
+) -> bool:
+    for c in constraints:
+        rule = c.get("rule", "")
+        match rule:
+            case "regex":
+                pattern = c.get("pattern", "")
+                if not re.fullmatch(pattern, str(value or "")):
+                    return False
+            case _:
+                continue
+    return True
+
+
 def map_agent_output(
     agent_output: list[Dict[str, Any]],
     model_mapper: dict[str, str],
@@ -788,6 +848,20 @@ def map_agent_output(
             set_value_at_path(mapped_output, key_path, value)
     return mapped_output
 
+
+def process_texts_for_agent(
+    texts: list[list[str]],
+    mode: str = "per_zone",
+    *,
+    debug: bool = False
+) -> list[list[str]]:
+    if not texts:
+        raise ValueError("No texts provided for agent processing")
+    
+    if not mode == "per_zone":
+        return [[" \n ".join(page)] for page in texts]
+
+    return texts
 
 # ========= Node Utilities =========
 def get_node_by_id(flow: dict, node_id: str) -> Optional[dict]:
@@ -934,6 +1008,14 @@ def execute_node_by_type(
 
         case "agent":
             status, output = node_agent(
+                node,
+                texts,
+                debug=debug,
+            )
+            children_ids = get_node_children(node)
+
+        case "group":
+            status, output = node_group(
                 node,
                 texts,
                 debug=debug,
@@ -1203,15 +1285,11 @@ def node_detection(
 
 
 def node_agent(
-    node: dict,
-    texts: list[list[str]],
-    *,
-    debug: bool = False,
-) -> tuple[bool, dict]:
-    if not texts:
-        print_debug("No texts provided to Agent node.", debug, tags=["NODE", "AGENT", "ERROR"])
-        return False, {}
-    
+        node: dict,
+        texts: list[list[str]],
+        *,
+        debug: bool = False,
+) -> tuple[bool, dict]:    
     node_config = get_node_config(node)
 
     model = node_config.get("model", None)
@@ -1222,8 +1300,15 @@ def node_agent(
     version = node_config.get("version", "latest")
     processing_mode = node_config.get("processing_mode", "per_zone") # "all_at_once" or "per_zone"
 
-    if processing_mode == "all_at_once":
-        texts = [[" \n ".join(page_texts)] for page_texts in texts]
+    try:
+        texts = process_texts_for_agent(
+            texts,
+            mode=processing_mode,
+            debug=debug,
+        )
+    except Exception as e:
+        print_debug(f"Failed to process texts for Agent node: {e}", debug, tags=["NODE", "AGENT", "ERROR"])
+        return False, {}
 
     try:
         model, agent = get_cached_agent_model(model, version=version, debug=debug)
@@ -1232,13 +1317,28 @@ def node_agent(
         return False, {}
 
     entities_accumulated: list[list[Dict[str, Any]]] = []
+    labels = agent.get("labels", [])
+    requirements = agent.get("requirements", {})
+
+    patterns: list[str] = []
+    for r in requirements.values():
+        for c in r:
+            if c.get("rule") == "regex":
+                patterns.append(c.get("pattern", ""))
 
     for p in texts:
         for text in p:
+            if patterns and not is_interesting_zone(
+                text,
+                patterns,
+                debug=debug,
+            ):
+                continue
+
             status, agent_output = _predict_agent(
                 text,
                 model,
-                agent,
+                labels,
                 conf=float(node_config.get("confidence_threshold", 0.5)),
                 debug=debug,
             )
@@ -1249,12 +1349,167 @@ def node_agent(
             entities_accumulated.append(agent_output)
 
     transformed_mapper = agent.get("transformed_mapper")
+
+    if requirements:
+        entities_accumulated = check_entities_by_label(
+            entities_accumulated,
+            requirements,
+            debug=debug,
+        )
     best_entities = best_entities_by_label(entities_accumulated, debug=debug)
     best_entities_list = list(best_entities.values())
     mapped_output = map_agent_output(best_entities_list, transformed_mapper, debug=debug)
 
     print_debug(f"Agent node completed successfully. {mapped_output}", debug, tags=["NODE", "AGENT", "INFO"])
 
+    return True, mapped_output
+
+
+def node_group(
+        node: dict,
+        texts: list[list[str]],
+        *,
+        debug: bool = False,
+) -> tuple[bool, dict]:
+    """Group node: exécute plusieurs agents GLiNER et fusionne leurs sorties.
+
+    Objectif:
+      - permettre d'utiliser plusieurs modèles (tokenizers/labels différents) sur le même texte
+      - renvoyer UNE sortie mappée (comme node_agent), avec résolution de conflits
+
+    Config attendu (node.config):
+      processing_mode: "per_zone" | "all_at_once"
+      confidence_threshold: float (seuil par défaut)
+      agents: [
+        { "model": "<reference>", "version": "latest" | "...", "confidence_threshold": 0.5?, "labels": [...]? },
+        ...
+      ]
+
+    Stratégie de fusion:
+      - chaque agent produit ses "best entities" par label
+      - on mappe label -> key_path via transformed_mapper
+      - si plusieurs agents écrivent sur le même key_path, on garde la valeur au score le plus élevé
+        (ou le premier en cas d'égalité).
+    """
+    node_config = get_node_config(node)
+
+    processing_mode = node_config.get("processing_mode", "per_zone")
+    default_conf = float(node_config.get("confidence_threshold", 0.5))
+
+    try:
+        texts = process_texts_for_agent(
+            texts,
+            mode=processing_mode,
+            debug=debug,
+        )
+    except Exception as e:
+        print_debug(f"Failed to process texts for Group node: {e}", debug, tags=["NODE", "GROUP", "ERROR"])
+        return False, {}
+
+    group_agents = node_config.get("agents", []) or []
+    if not group_agents:
+        print_debug("No agents specified for Group node.", debug, tags=["NODE", "GROUP", "ERROR"])
+        return False, {}
+
+    # Accumulate best result per key_path across all agents
+    best_by_path: dict[str, Dict[str, Any]] = {}
+
+    def run_one_agent(agent_spec: dict) -> dict[str, Dict[str, Any]]:
+        agent_reference = str(agent_spec.get("model", "") or "").strip()
+        if not agent_reference:
+            return {}
+
+        version = agent_spec.get("version", "latest")
+        conf = float(agent_spec.get("confidence_threshold", default_conf))
+
+        try:
+            model, agent = get_cached_agent_model(agent_reference, version=version, debug=debug)
+        except Exception as e:
+            print_debug(f"Failed to load agent model '{agent_reference}': {e}", debug, tags=["NODE", "GROUP", "ERROR"])
+            return {}
+
+        labels = agent_spec.get("labels") or agent.get("labels", []) or []
+        transformed_mapper: dict[str, str] = agent.get("transformed_mapper", {}) or {}
+
+        entities_accumulated: list[list[Dict[str, Any]]] = []
+
+        for p in texts:
+            for text in p:
+                status, agent_output = _predict_agent(
+                    text,
+                    model,
+                    list(labels),
+                    conf=conf,
+                    debug=debug,
+                )
+                if not status or not agent_output:
+                    continue
+                entities_accumulated.append(agent_output)
+
+        if not entities_accumulated:
+            return {}
+
+        best_entities = best_entities_by_label(entities_accumulated, debug=debug)
+
+        # Convert label-best -> path-best (keep best score per path within this agent)
+        local_best: dict[str, Dict[str, Any]] = {}
+        for label, ent in best_entities.items():
+            path = transformed_mapper.get(label)
+            if not path:
+                # label non mappé => on ignore (ou log)
+                continue
+            score = float(ent.get("score", 0.0) or 0.0)
+            cur = local_best.get(path)
+            if (cur is None) or (score > float(cur.get("score", 0.0) or 0.0)):
+                local_best[path] = {
+                    "value": ent.get("value", ""),
+                    "score": score,
+                    "label": label,
+                    "agent": agent_reference,
+                }
+        return local_best
+
+    # Optionnel: paralléliser par agent (utile CPU). On reste prudent (torch + threads).
+    parallel = bool(node_config.get("parallel", True))
+    max_workers = int(node_config.get("max_workers", min(FLOW_MAX_WORKERS, len(group_agents))))
+
+    if parallel and max_workers > 1 and len(group_agents) > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(run_one_agent, a) for a in group_agents]
+            for f in futures:
+                local_best = f.result() or {}
+                for path, item in local_best.items():
+                    cur = best_by_path.get(path)
+                    if cur is None or float(item.get("score", 0.0)) > float(cur.get("score", 0.0)):
+                        best_by_path[path] = item
+    else:
+        for a in group_agents:
+            local_best = run_one_agent(a)
+            for path, item in (local_best or {}).items():
+                cur = best_by_path.get(path)
+                if cur is None or float(item.get("score", 0.0)) > float(cur.get("score", 0.0)):
+                    best_by_path[path] = item
+
+    # Build final mapped output
+    mapped_output: dict = {}
+    for path, item in best_by_path.items():
+        set_value_at_path(mapped_output, path, item.get("value", ""))
+
+    # Debug trace (facultatif)
+    if debug:
+        set_value_at_path(
+            mapped_output,
+            "_debug.group",
+            {
+                "agents_count": len(group_agents),
+                "paths_filled": len(best_by_path),
+                "parallel": parallel,
+                "max_workers": max_workers,
+                "winners": best_by_path,  # contient score/agent/label
+            },
+        )
+
+    print_debug(f"Group node completed successfully. {mapped_output}", debug, tags=["NODE", "GROUP", "INFO"])
     return True, mapped_output
 
 
@@ -1490,7 +1745,7 @@ if __name__ == "__main__":
             "id": "node_DETECTION",
             "type": "zone-detection",
             "inputs": ["node_SARDINE"],
-            "outputs": ["node_SIREN", "node_ADDRESS", "node_VAT"],
+            "outputs": ["node_CUSTOMER_NUMBER", "node_DOC_NUMBER", "node_SIREN", "node_SELLER_ADDRESS", "node_VAT"],
             "config": {
                 "model_path": "C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\sardine.agents\\sard-det\\best.pt",
                 "confidence_threshold": 0.75,
@@ -1498,6 +1753,30 @@ if __name__ == "__main__":
                 "page_mode": "first_page_only",
                 "page_dpi": 512,
                 "device": "cpu",
+            },
+        },
+
+        "node_CUSTOMER_NUMBER": {
+            "id": "node_CUSTOMER_NUMBER",
+            "type": "agent",
+            "inputs": ["node_DETECTION"],
+            "outputs": ["node_END"],
+            "config": {
+                "model": "customer-number",
+                "version": "latest",
+                "processing_mode": "per_zone",
+            },
+        },
+
+        "node_DOC_NUMBER": {
+            "id": "node_DOC_NUMBER",
+            "type": "agent",
+            "inputs": ["node_DETECTION"],
+            "outputs": ["node_END"],
+            "config": {
+                "model": "document-number",
+                "version": "latest",
+                "processing_mode": "per_zone",
             },
         },
 
@@ -1513,15 +1792,23 @@ if __name__ == "__main__":
             },
         },
 
-        "node_ADDRESS": {
-            "id": "node_ADDRESS",
-            "type": "agent",
+        "node_SELLER_ADDRESS": {
+            "id": "node_SELLER_ADDRESS",
+            "type": "group",
             "inputs": ["node_DETECTION"],
             "outputs": ["node_END"],
             "config": {
-                "model": "address",
-                "version": "latest",
                 "processing_mode": "per_zone",
+                "agents": [
+                    {
+                        "model": "address",
+                        "version": "latest",
+                    },
+                    {
+                        "model": "seller-group",
+                        "version": "latest",
+                    }
+                ]
             },
         },
 
@@ -1537,26 +1824,26 @@ if __name__ == "__main__":
             },
         },
 
-        "node_END": {"id": "node_END", "type": "final", "inputs": ["node_SARDINE", "node_SIREN", "node_ADDRESS", "node_VAT"], "outputs": []},
+        "node_END": {"id": "node_END", "type": "final", "inputs": ["node_SARDINE", "node_CUSTOMER_NUMBER", "node_DOC_NUMBER", "node_SIREN", "node_SELLER_ADDRESS", "node_VAT"], "outputs": []},
     }
     print("=== Sardine -> Detection flow template is available in variable: sardine_detection_flow ===")
 
     files_to_test_ok = [
-        # "facture_001-1",
-        # "facture_002-1",
-        # "facture_003-2",
+        "facture_001-1",
+        "facture_002-1",
+        "facture_003-2",
         "FACTDVX_01_TERRESDUSUD",
         "9472_Facture_TransportsCombemale_001",
-        # "8787_Facture_SocieteNouvelleDeMateriaux_001",
-        # "2024071184",
-        # "F2024-09-30",
-        # "DIPRES_20241004",
-        # "FACT33481-1"
+        "8787_Facture_SocieteNouvelleDeMateriaux_001",
+        "2024071184",
+        "F2024-09-30",
+        "DIPRES_20241004",
+        "FACT33481-1"
     ]
 
     files_to_test_nok = [
-        "bulletin_de_paie",
-        "5e7f689f-051c-41ca-b067-bb2a387cdf8f"
+        # "bulletin_de_paie",
+        # "5e7f689f-051c-41ca-b067-bb2a387cdf8f"
     ]
 
     BASE_DIR_OK = r"C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\invoices"
