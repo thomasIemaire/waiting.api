@@ -13,9 +13,9 @@ from uuid import uuid4
 from datetime import datetime
 from typing import Any, Callable, Dict, Literal, Optional, Union
 from collections.abc import Mapping, Sequence
-
-
 import warnings
+
+from text_normalization import count_entities
 
 # ========= Hugging Face cache / warnings =========
 def configure_hf_cache(cache_dir: str | None = None, *, debug: bool = False) -> str:
@@ -117,6 +117,8 @@ OCR_MAX_WORKERS = 24
 
 _YOLO_CACHE: dict[str, Any] = {}
 _YOLO_LOCK = threading.Lock()
+
+_YOLO_TBL_MODEL_PATH = "C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\sardine.agents\\sard-tbl\\best.pt"
 
 _AGENT_CACHE: dict[str, dict[str, Any]] = {}
 _AGENT_LOCK = threading.Lock()
@@ -460,7 +462,7 @@ def _ocr_pil_image(image: Image.Image, *, lang: str = "fra+eng", debug: bool = F
     _require(pytesseract, "pytesseract")
 
     image = image.convert("RGB")
-    image = _deskew_and_orient(image, debug=debug)
+    # image = _deskew_and_orient(image, debug=debug)
     image = _preprocess_for_ocr(image, debug=debug)
 
     text = pytesseract.image_to_string(image, lang=lang, config="--oem 3 --psm 6")  # type: ignore[union-attr]
@@ -617,8 +619,33 @@ def _predict_document_detection(
     return output, duration_detection, duration_ocr
 
 
+def _predict_table_detection(
+    image: Image.Image,
+    device: str = "cpu",
+    *,
+    model_path: str  =_YOLO_TBL_MODEL_PATH,
+    conf: float = 0.25,
+    debug: bool = False,
+    padding: int = 8,
+) -> Any:
+    model_tbl = get_cached_yolo_model(model_path, debug=debug)
+
+    try:
+        tbl_results = model_tbl.predict(
+            source=[image], save=False, conf=conf, device=device, verbose=False
+        )
+        print_debug(f"Table detection completed.", debug, tags=["SARDINE", "TABLE_DETECT"])
+        print_debug(f"Detection results: {tbl_results}", debug, tags=["SARDINE", "TABLE_DETECT"])
+        return tbl_results[0]
+    except Exception as e:
+        print_debug(f"Table detection failed: {e}", debug, tags=["SARDINE", "TABLE_DETECT"])
+        return None
+
+
 def _clean_detection_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", text)
+    text = text.replace("\n\n", "\n")
+    text = text.replace("-\n", "")
+    text = text.replace("\n", " \n ")
     text = text.strip()
     return text
 
@@ -771,6 +798,8 @@ def best_entities_by_label(
     *,
     debug: bool = False
 ) -> dict[str, Dict[str, Any]]:
+    print_debug(f"Agent output: {agent_output} before best_entities_by_label processing", debug, tags=["AGENT", "BEST_ENTITIES", "DATA"])
+    
     best_entities: dict[str, Dict[str, Any]] = {}
     for page in agent_output:
         for ent in page:
@@ -791,7 +820,6 @@ def check_entities_by_label(
     for page in agent_output:
         page_entities: list[Dict[str, Any]] = []
         for ent in page:
-            print_debug(f"Checking entity: {ent}", debug, tags=["AGENT", "CHECK"])
             label = ent.get("label", "")
             value = ent.get("value", "")
             if label not in required_labels or \
@@ -799,7 +827,6 @@ def check_entities_by_label(
                (label in required_labels and required_labels[label] and is_valid_entity(value, required_labels[label], debug=debug)):
                 page_entities.append(ent)        
         output.append(page_entities)
-    print_debug(f"Checked entities output: {output}", debug, tags=["AGENT", "CHECK"])
     return output
 
 
@@ -858,10 +885,21 @@ def process_texts_for_agent(
     if not texts:
         raise ValueError("No texts provided for agent processing")
     
-    if not mode == "per_zone":
-        return [[" \n ".join(page)] for page in texts]
+    match mode:
+        case "all_at_once":
+            return [[" \n ".join(page) for page in texts]]
+        case "per_pair":
+            return [[texts[i][j] + " \n " + texts[i][j+1]
+                     for j in range(0, len(texts[i]) - 1, 2)]
+                    for i in range(len(texts))]
+        case "half_page":
+            return [[" \n ".join(texts[i][j:j + max(1, len(texts[i]) // 2)])
+                     for j in range(0, len(texts[i]), max(1, len(texts[i]) // 2))]
+                    for i in range(len(texts))]
+        case _:
+            return texts
 
-    return texts
+
 
 # ========= Node Utilities =========
 def get_node_by_id(flow: dict, node_id: str) -> Optional[dict]:
@@ -997,7 +1035,7 @@ def execute_node_by_type(
             status, output, children_ids = True, input_ctx, []
 
         case "sardine":
-            status, images, output = node_sardine(node, input_ctx, base64_data, debug=debug, images=images)
+            status, images, _ = node_sardine(node, input_ctx, base64_data, debug=debug, images=images)
             children_ids = get_node_children(node)["valid"] if images else get_node_children(node)["invalid"]
 
         case "zone-detection":
@@ -1226,7 +1264,7 @@ def node_sardine(
         if cls in accepted_files:
             accepted_images.append(images[i])
 
-    return True, accepted_images, { "document": { "details": { "classes": classes } } }
+    return True, accepted_images, classes
 
 
 def node_detection(
@@ -1298,7 +1336,7 @@ def node_agent(
         return False, {}
 
     version = node_config.get("version", "latest")
-    processing_mode = node_config.get("processing_mode", "per_zone") # "all_at_once" or "per_zone"
+    processing_mode = node_config.get("processing_mode", "per_zone") # "all_at_once" or "per_zone" or "per_pair" or "half_page"
 
     try:
         texts = process_texts_for_agent(
@@ -1325,6 +1363,8 @@ def node_agent(
         for c in r:
             if c.get("rule") == "regex":
                 patterns.append(c.get("pattern", ""))
+
+    print_debug(f"Agent node started. Model: {node_config.get('model')} Version: {version} Labels: {labels}", debug, tags=["NODE", "AGENT", "INFO"])
 
     for p in texts:
         for text in p:
@@ -1356,6 +1396,7 @@ def node_agent(
             requirements,
             debug=debug,
         )
+
     best_entities = best_entities_by_label(entities_accumulated, debug=debug)
     best_entities_list = list(best_entities.values())
     mapped_output = map_agent_output(best_entities_list, transformed_mapper, debug=debug)
@@ -1373,23 +1414,10 @@ def node_group(
 ) -> tuple[bool, dict]:
     """Group node: exécute plusieurs agents GLiNER et fusionne leurs sorties.
 
-    Objectif:
-      - permettre d'utiliser plusieurs modèles (tokenizers/labels différents) sur le même texte
-      - renvoyer UNE sortie mappée (comme node_agent), avec résolution de conflits
-
-    Config attendu (node.config):
-      processing_mode: "per_zone" | "all_at_once"
-      confidence_threshold: float (seuil par défaut)
-      agents: [
-        { "model": "<reference>", "version": "latest" | "...", "confidence_threshold": 0.5?, "labels": [...]? },
-        ...
-      ]
-
-    Stratégie de fusion:
-      - chaque agent produit ses "best entities" par label
-      - on mappe label -> key_path via transformed_mapper
-      - si plusieurs agents écrivent sur le même key_path, on garde la valeur au score le plus élevé
-        (ou le premier en cas d'égalité).
+    Variante:
+      - charge tous les modèles au début
+      - agrège tous les labels de tous les agents (config + modèle)
+      - envoie TOUS les labels à CHAQUE modèle lors de l'inférence
     """
     node_config = get_node_config(node)
 
@@ -1411,13 +1439,14 @@ def node_group(
         print_debug("No agents specified for Group node.", debug, tags=["NODE", "GROUP", "ERROR"])
         return False, {}
 
-    # Accumulate best result per key_path across all agents
-    best_by_path: dict[str, Dict[str, Any]] = {}
+    # 1) Précharge tous les modèles + récupère infos utiles
+    loaded_agents: list[dict] = []
+    all_labels: list[str] = []
 
-    def run_one_agent(agent_spec: dict) -> dict[str, Dict[str, Any]]:
+    for agent_spec in group_agents:
         agent_reference = str(agent_spec.get("model", "") or "").strip()
         if not agent_reference:
-            return {}
+            continue
 
         version = agent_spec.get("version", "latest")
         conf = float(agent_spec.get("confidence_threshold", default_conf))
@@ -1425,20 +1454,63 @@ def node_group(
         try:
             model, agent = get_cached_agent_model(agent_reference, version=version, debug=debug)
         except Exception as e:
-            print_debug(f"Failed to load agent model '{agent_reference}': {e}", debug, tags=["NODE", "GROUP", "ERROR"])
-            return {}
+            print_debug(
+                f"Failed to load agent model '{agent_reference}': {e}",
+                debug,
+                tags=["NODE", "GROUP", "ERROR"],
+            )
+            continue
 
-        labels = agent_spec.get("labels") or agent.get("labels", []) or []
+        all_labels.extend(agent.get("labels", []))
+
+        loaded_agents.append({
+            "reference": agent_reference,
+            "version": version,
+            "conf": conf,
+            "model": model,
+            "agent": agent,
+            "agent_spec": agent_spec,
+        })
+
+    if not loaded_agents:
+        print_debug("No valid agents could be loaded for Group node.", debug, tags=["NODE", "GROUP", "ERROR"])
+        return False, {}
+
+    # 2) Accumulate best result per key_path across all agents
+    best_by_path: dict[str, Dict[str, Any]] = {}
+
+    def run_one_loaded_agent(a: dict) -> dict[str, Dict[str, Any]]:
+        agent_reference: str = a["reference"]
+        conf: float = a["conf"]
+        model = a["model"]
+        agent = a["agent"]
+
         transformed_mapper: dict[str, str] = agent.get("transformed_mapper", {}) or {}
+        requirements = agent.get("requirements", {})
+
+        patterns: list[str] = []
+        for r in requirements.values():
+            for c in r:
+                if c.get("rule") == "regex":
+                    patterns.append(c.get("pattern", ""))
 
         entities_accumulated: list[list[Dict[str, Any]]] = []
 
+        print_debug(f"Running agent '{agent_reference}' in Group node with labels: {list(all_labels)}", debug, tags=["NODE", "GROUP", "INFO"])
+
         for p in texts:
             for text in p:
+                if patterns and not is_interesting_zone(
+                    text,
+                    patterns,
+                    debug=debug,
+                ):
+                    continue
+
                 status, agent_output = _predict_agent(
                     text,
                     model,
-                    list(labels),
+                    list(all_labels),
                     conf=conf,
                     debug=debug,
                 )
@@ -1449,6 +1521,13 @@ def node_group(
         if not entities_accumulated:
             return {}
 
+        if requirements:
+            entities_accumulated = check_entities_by_label(
+                entities_accumulated,
+                requirements,
+                debug=debug,
+            )
+
         best_entities = best_entities_by_label(entities_accumulated, debug=debug)
 
         # Convert label-best -> path-best (keep best score per path within this agent)
@@ -1456,7 +1535,7 @@ def node_group(
         for label, ent in best_entities.items():
             path = transformed_mapper.get(label)
             if not path:
-                # label non mappé => on ignore (ou log)
+                # label non mappé dans CE modèle => ignoré
                 continue
             score = float(ent.get("score", 0.0) or 0.0)
             cur = local_best.get(path)
@@ -1471,11 +1550,11 @@ def node_group(
 
     # Optionnel: paralléliser par agent (utile CPU). On reste prudent (torch + threads).
     parallel = bool(node_config.get("parallel", True))
-    max_workers = int(node_config.get("max_workers", min(FLOW_MAX_WORKERS, len(group_agents))))
+    max_workers = int(node_config.get("max_workers", min(FLOW_MAX_WORKERS, len(loaded_agents))))
 
-    if parallel and max_workers > 1 and len(group_agents) > 1:
+    if parallel and max_workers > 1 and len(loaded_agents) > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(run_one_agent, a) for a in group_agents]
+            futures = [ex.submit(run_one_loaded_agent, a) for a in loaded_agents]
             for f in futures:
                 local_best = f.result() or {}
                 for path, item in local_best.items():
@@ -1483,8 +1562,8 @@ def node_group(
                     if cur is None or float(item.get("score", 0.0)) > float(cur.get("score", 0.0)):
                         best_by_path[path] = item
     else:
-        for a in group_agents:
-            local_best = run_one_agent(a)
+        for a in loaded_agents:
+            local_best = run_one_loaded_agent(a)
             for path, item in (local_best or {}).items():
                 cur = best_by_path.get(path)
                 if cur is None or float(item.get("score", 0.0)) > float(cur.get("score", 0.0)):
@@ -1495,21 +1574,11 @@ def node_group(
     for path, item in best_by_path.items():
         set_value_at_path(mapped_output, path, item.get("value", ""))
 
-    # Debug trace (facultatif)
-    if debug:
-        set_value_at_path(
-            mapped_output,
-            "_debug.group",
-            {
-                "agents_count": len(group_agents),
-                "paths_filled": len(best_by_path),
-                "parallel": parallel,
-                "max_workers": max_workers,
-                "winners": best_by_path,  # contient score/agent/label
-            },
-        )
-
-    print_debug(f"Group node completed successfully. {mapped_output}", debug, tags=["NODE", "GROUP", "INFO"])
+    print_debug(
+        f"Group node completed successfully. labels={len(all_labels)} agents={len(loaded_agents)} output={mapped_output}",
+        debug,
+        tags=["NODE", "GROUP", "INFO"],
+    )
     return True, mapped_output
 
 
@@ -1617,6 +1686,17 @@ def process_flow(flow: dict, base64_data: Any, *, debug: bool = False) -> dict:
                 except Exception as e:
                     print_debug(f"Exception in node {node_id}: {e}", debug, tags=["FLOW", "CRITICAL"])
 
+    if debug:
+        entity_counts = count_entities(texts, decimal=".")
+
+        texts_debug = {
+            "entity_counts": entity_counts,
+            "pages": texts,
+        }
+        
+        with open("flow_debug_output.json", "w", encoding="utf-8") as f:
+            json.dump(merge_dicts(result, texts_debug), f, indent=2, ensure_ascii=False)
+
     # Flow debug details
     set_value_at_path(result, "_debug.flow", get_flow_details(result))
     print_debug("Flow processing completed.", debug, tags=["FLOW"])
@@ -1719,9 +1799,13 @@ if __name__ == "__main__":
     }
 
     # === Sardine -> Detection gating flow template ===
-    dpi = 768
+    dpi = 512
     sardine_detection_flow = {
-        "start": {"id": "start", "type": "start", "outputs": ["node_SARDINE"]},
+        "start": {
+            "id": "start",
+            "type": "start",
+            "outputs": ["node_SARDINE"]
+        },
 
         "node_SARDINE": {
             "id": "node_SARDINE",
@@ -1736,7 +1820,7 @@ if __name__ == "__main__":
                 "accepted_files": ["facture"],
                 "stop_if_no_match": True,
                 "page_mode": "first_page_only",
-                "page_dpi": 512,
+                "page_dpi": dpi,
                 "device": "cpu",
             },
         },
@@ -1745,13 +1829,13 @@ if __name__ == "__main__":
             "id": "node_DETECTION",
             "type": "zone-detection",
             "inputs": ["node_SARDINE"],
-            "outputs": ["node_CUSTOMER_NUMBER", "node_DOC_NUMBER", "node_SIREN", "node_SELLER_ADDRESS", "node_VAT"],
+            "outputs": ["node_CUSTOMER_NUMBER", "node_DOC_NUMBER", "node_SELLER_SIREN", "node_SELLER_ADDRESS", "node_CUSTOMER_SIREN"],
             "config": {
                 "model_path": "C:\\Users\\Utilisateur\\Documents\\workspace.sardine.v2\\sardine.agents\\sard-det\\best.pt",
-                "confidence_threshold": 0.75,
+                "confidence_threshold": 0.5,
                 "zone_padding": 8,
                 "page_mode": "first_page_only",
-                "page_dpi": 512,
+                "page_dpi": dpi,
                 "device": "cpu",
             },
         },
@@ -1780,15 +1864,29 @@ if __name__ == "__main__":
             },
         },
 
-        "node_SIREN": {
-            "id": "node_SIREN",
-            "type": "agent",
+        "node_SELLER_SIREN": {
+            "id": "node_SELLER_SIREN",
+            "type": "group",
             "inputs": ["node_DETECTION"],
             "outputs": ["node_END"],
             "config": {
-                "model": "siren",
-                "version": "latest",
+                "root": "seller",
+                "confidence_threshold": 0.5,
                 "processing_mode": "per_zone",
+                "agents": [
+                    {
+                        "model": "siren",
+                        "version": "latest",
+                    },
+                    {
+                        "model": "vat-number",
+                        "version": "latest",
+                    },
+                    {
+                        "model": "seller-group",
+                        "version": "latest",
+                    }
+                ]
             },
         },
 
@@ -1798,6 +1896,8 @@ if __name__ == "__main__":
             "inputs": ["node_DETECTION"],
             "outputs": ["node_END"],
             "config": {
+                "root": "seller",
+                "confidence_threshold": 0.5,
                 "processing_mode": "per_zone",
                 "agents": [
                     {
@@ -1812,19 +1912,38 @@ if __name__ == "__main__":
             },
         },
 
-        "node_VAT": {
-            "id": "node_VAT",
-            "type": "agent",
+        "node_CUSTOMER_SIREN": {
+            "id": "node_CUSTOMER_SIREN",
+            "type": "group",
             "inputs": ["node_DETECTION"],
             "outputs": ["node_END"],
             "config": {
-                "model": "vat-number",
-                "version": "latest",
+                "root": "customer",
+                "confidence_threshold": 0.5,
                 "processing_mode": "per_zone",
+                "agents": [
+                    {
+                        "model": "siren",
+                        "version": "latest",
+                    },
+                    {
+                        "model": "vat-number",
+                        "version": "latest",
+                    },
+                    {
+                        "model": "customer-group",
+                        "version": "latest",
+                    }
+                ]
             },
         },
 
-        "node_END": {"id": "node_END", "type": "final", "inputs": ["node_SARDINE", "node_CUSTOMER_NUMBER", "node_DOC_NUMBER", "node_SIREN", "node_SELLER_ADDRESS", "node_VAT"], "outputs": []},
+        "node_END": {
+            "id": "node_END",
+            "type": "final",
+            "inputs": ["node_SARDINE", "node_CUSTOMER_NUMBER", "node_DOC_NUMBER", "node_SELLER_SIREN", "node_SELLER_ADDRESS", "node_CUSTOMER_SIREN"],
+            "outputs": []
+        },
     }
     print("=== Sardine -> Detection flow template is available in variable: sardine_detection_flow ===")
 
@@ -1832,7 +1951,8 @@ if __name__ == "__main__":
         "facture_001-1",
         "facture_002-1",
         "facture_003-2",
-        "FACTDVX_01_TERRESDUSUD",
+        # "FACTDVX_01_TERRESDUSUD",
+        "FACTDVX_01_TERRESDUSUD_WPLI",
         "9472_Facture_TransportsCombemale_001",
         "8787_Facture_SocieteNouvelleDeMateriaux_001",
         "2024071184",
@@ -1851,7 +1971,7 @@ if __name__ == "__main__":
 
     def _get_flow_duration(res: dict) -> float:
         flow_dbg = res.get("_debug", {}).get("flow", {})
-        return float(flow_dbg.get("total_node_duration", flow_dbg.get("duration", 0.0)) or 0.0)
+        return float(flow_dbg.get("duration", 0.0) or 0.0)
 
     def _get_node_duration(res: dict, node_id: str) -> float | None:
         nodes_dbg = res.get("_debug", {}).get("nodes", {})
@@ -1862,17 +1982,17 @@ if __name__ == "__main__":
 
     # --- stats cumulées
     stats = {
-        "node_count": len(files_to_test_ok) + len(files_to_test_nok),
-        "node_count_ok": len(files_to_test_ok),
-        "node_count_nok": len(files_to_test_nok),
+        "flow_count": len(files_to_test_ok) + len(files_to_test_nok),
+        "flow_count_ok": len(files_to_test_ok),
+        "flow_count_nok": len(files_to_test_nok),
 
-        "total_node_duration": 0.0,
-        "total_node_duration_ok": 0.0,
-        "total_node_duration_nok": 0.0,
+        "total_flow_duration": 0.0,
+        "total_flow_duration_ok": 0.0,
+        "total_flow_duration_nok": 0.0,
 
-        "average_node_duration": 0.0,
-        "average_node_duration_ok": 0.0,
-        "average_node_duration_nok": 0.0,
+        "average_flow_duration": 0.0,
+        "average_flow_duration_ok": 0.0,
+        "average_flow_duration_nok": 0.0,
     }
 
     node_stats = {
@@ -1898,11 +2018,11 @@ if __name__ == "__main__":
 
     def _update_avgs():
         if test_idx > 0:
-            stats["average_node_duration"] = stats["total_node_duration"] / test_idx
+            stats["average_flow_duration"] = stats["total_flow_duration"] / test_idx
         if ok_seen > 0:
-            stats["average_node_duration_ok"] = stats["total_node_duration_ok"] / ok_seen
+            stats["average_flow_duration_ok"] = stats["total_flow_duration_ok"] / ok_seen
         if nok_seen > 0:
-            stats["average_node_duration_nok"] = stats["total_node_duration_nok"] / nok_seen
+            stats["average_flow_duration_nok"] = stats["total_flow_duration_nok"] / nok_seen
 
     def _run_one(file_name: str, label: str, base_dir: str):
         global test_idx, ok_seen, nok_seen
@@ -1919,31 +2039,30 @@ if __name__ == "__main__":
 
         # --- totals global
         test_idx += 1
-        stats["total_node_duration"] += flow_dur
+        stats["total_flow_duration"] += flow_dur
 
         if label == "ok":
             ok_seen += 1
-            stats["total_node_duration_ok"] += flow_dur
+            stats["total_flow_duration_ok"] += flow_dur
         else:
             nok_seen += 1
-            stats["total_node_duration_nok"] += flow_dur
+            stats["total_flow_duration_nok"] += flow_dur
 
         _update_avgs()
 
         # --- séries globales pour graphes
         x_all.append(test_idx)
         y_all.append(flow_dur)
-        y_all_avg.append(stats["average_node_duration"])
+        y_all_avg.append(stats["average_flow_duration"])
 
         if label == "ok":
             x_ok.append(ok_seen)
             y_ok.append(flow_dur)
-            y_ok_avg.append(stats["average_node_duration_ok"])
+            y_ok_avg.append(stats["average_flow_duration_ok"])
         else:
             x_nok.append(nok_seen)
             y_nok.append(flow_dur)
-            y_nok_avg.append(stats["average_node_duration_nok"])
-
+            y_nok_avg.append(stats["average_flow_duration_nok"])
         # --- node averages cumulées (on n’incrémente que si la node a tourné)
         def upd_node(node_id: str, dur: float | None):
             if dur is None:
@@ -1972,18 +2091,18 @@ if __name__ == "__main__":
             "label": label,
 
             "flow_duration": flow_dur,
-            "flow_avg_total": stats["average_node_duration"],
-            "flow_avg_ok": stats["average_node_duration_ok"],
-            "flow_avg_nok": stats["average_node_duration_nok"],
+            "flow_avg_total": stats["average_flow_duration"],
+            "flow_avg_ok": stats["average_flow_duration_ok"],
+            "flow_avg_nok": stats["average_flow_duration_nok"],
 
             "node_SARDINE_duration": sard_dur,
             "node_SARDINE_avg": sard_avg,        # moyenne cumulée sur les runs où la node existe
             "node_DETECTION_duration": det_g_dur,
             "node_DETECTION_avg": det_avg,       # idem (souvent absent sur NOK)
 
-            "tot_total": stats["total_node_duration"],
-            "tot_ok": stats["total_node_duration_ok"],
-            "tot_nok": stats["total_node_duration_nok"],
+            "tot_total": stats["total_flow_duration"],
+            "tot_ok": stats["total_flow_duration_ok"],
+            "tot_nok": stats["total_flow_duration_nok"],
 
             "node_DETECTION_ocr_duration": ocr_dur,
             "node_DETECTION_ocr_avg": det_ocr_avg,

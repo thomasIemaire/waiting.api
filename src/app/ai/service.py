@@ -7,7 +7,8 @@ from src.app.documents.service import DocumentsService
 from src.app.flows.service import FlowService # Import ajouté
 
 from src.helpers import documents as doc_utils
-from src.helpers import flows # Import du module flows modifié
+# from src.helpers import flows # Import du module flows modifié
+from src.helpers import flows_mg as flows # Import du module flows modifié
 
 class AiService(BaseService):
 
@@ -34,45 +35,48 @@ class AiService(BaseService):
         # --- RÉCUPÉRATION DYNAMIQUE DU FLUX ---
         
         # 1. On cherche un flow_id dans la requête, sinon on prend le premier disponible
-        flow_id = data.get("flow_id", None)
-        flow_doc = None
-        print(f"[AiService] Requested flow_id: {flow_id}")
+        # flow_id = data.get("flow_id", None)
+        # flow_doc = None
+        # print(f"[AiService] Requested flow_id: {flow_id}")
 
-        if not flow_id:
-            flow_doc = self.flow_service.get_default_flow()
-        elif flow_id:
-            flow_doc = self.flow_service.get_flow(flow_id=flow_id)
-        else:
-            # Fallback : on prend le premier flux trouvé
-            all_flows = list(self.flow_service.dao.find({}, limit=1))
-            if all_flows:
-                flow_doc = self.flow_service.dao.serialize(all_flows[0])
+        # if not flow_id:
+        #     flow_doc = self.flow_service.get_default_flow()
+        # elif flow_id:
+        #     flow_doc = self.flow_service.get_flow(flow_id=flow_id)
+        # else:
+        #     # Fallback : on prend le premier flux trouvé
+        #     all_flows = list(self.flow_service.dao.find({}, limit=1))
+        #     if all_flows:
+        #         flow_doc = self.flow_service.dao.serialize(all_flows[0])
         
-        if not flow_doc:
-            raise ValueError("Aucun flux actif trouvé pour traiter le document.")
+        # if not flow_doc:
+        #     raise ValueError("Aucun flux actif trouvé pour traiter le document.")
 
-        print(f"[AiService] Using flow: {flow_doc.get('name')} ({flow_doc.get('_id')})")
+        # print(f"[AiService] Using flow: {flow_doc.get('name')} ({flow_doc.get('_id')})")
 
-        # 2. Transformation du graphe JSON (Frontend) vers Graphe Exécutable (Engine)
-        engine_flow = flows.transform_graph(flow_doc.get("data", {}))
+        # # 2. Transformation du graphe JSON (Frontend) vers Graphe Exécutable (Engine)
+        # engine_flow = flows.transform_graph(flow_doc.get("data", {}))
 
         # 3. Exécution
-        result = flows.run(engine_flow, base64=document_data, debug=True)
+        result = flows.run(base64_str=document_data, threshold=0.2)
         
         # --- FIN MODIFICATIONS ---
 
-        type = result.get("type", "unknown")
-        analysis = result.get("analysis", {})
+        # type = result.get("type", "unknown")
+        # analysis = result.get("analysis", {})
 
-        document["type"] = type
-        document["analysis"] = analysis
+        # document["type"] = type
+        # document["analysis"] = analysis
 
         self.documents_service.dao.update_one(
             {"_id": ObjectId(document_id)},
             {
-                "type": type,
-                "analysis": analysis,
+                "type": "facture",
+                "analysis": result,
             }
         )
 
-        return document
+        return {
+                "type": "facture",
+                "analysis": result,
+            }

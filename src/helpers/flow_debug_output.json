@@ -1,0 +1,186 @@
+{
+  "_debug": {
+    "nodes": {
+      "node_SARDINE": {
+        "duration": 1.1245017051696777
+      },
+      "node_DETECTION": {
+        "ocr_duration": 1.143012523651123,
+        "detection_duration": 1.8501901626586914,
+        "duration": 3.000206232070923
+      },
+      "node_CUSTOMER_SIREN": {
+        "duration": 6.955390691757202
+      },
+      "node_CUSTOMER_NUMBER": {
+        "duration": 7.837228059768677
+      },
+      "node_DOC_NUMBER": {
+        "duration": 8.068812847137451
+      },
+      "node_SELLER_SIREN": {
+        "duration": 8.297862768173218
+      },
+      "node_SELLER_ADDRESS": {
+        "duration": 8.388851165771484
+      },
+      "node_END": {
+        "duration": 0.0010001659393310547
+      }
+    }
+  },
+  "customer": {
+    "number": "Votre"
+  },
+  "document": {
+    "number": "Facture"
+  },
+  "seller": {
+    "address": {
+      "street": "9 & 10 rue Louis",
+      "city": "Gay",
+      "country": "Lussac",
+      "zip_code": "11500"
+    }
+  },
+  "entity_counts": {
+    "words": {
+      "zi": 1,
+      "pomme": 1,
+      "rue": 1,
+      "louis": 1,
+      "gay": 1,
+      "lussac": 1,
+      "revel": 1,
+      "tel": 2,
+      "fax": 1,
+      "email": 1,
+      "site": 1,
+      "web": 1,
+      "marion": 3,
+      "materiaux": 3,
+      "gedimat": 3,
+      "stade": 2,
+      "quillan": 2,
+      "france": 1,
+      "livre": 1,
+      "facture": 1,
+      "date": 3,
+      "piece": 3,
+      "client": 2,
+      "reference": 3,
+      "cde": 2,
+      "commercial": 1,
+      "leon": 1,
+      "designation": 1,
+      "quantite": 1,
+      "puht": 1,
+      "montant": 2,
+      "personne": 1,
+      "contacter": 1,
+      "david": 1,
+      "ballester": 1,
+      "chargement": 1,
+      "semaine": 1,
+      "messagerie": 1,
+      "offre": 1,
+      "promo": 1,
+      "bon": 1,
+      "livraison": 1,
+      "appui": 1,
+      "intermediaire": 1,
+      "pvc": 1,
+      "mm": 1,
+      "gamme": 1,
+      "bis": 1,
+      "boi": 1,
+      "eco": 3,
+      "contribution": 3,
+      "tonne": 2,
+      "nto": 1,
+      "boite": 1,
+      "pieces": 1,
+      "port": 2,
+      "value": 1,
+      "cumul": 1,
+      "palettes": 1,
+      "kg": 1,
+      "total": 1,
+      "ht": 1,
+      "esc": 1,
+      "escompte": 1,
+      "base": 1,
+      "taux": 2,
+      "eur": 1,
+      "bic": 2,
+      "sogefrpp": 1,
+      "net": 1,
+      "payer": 1,
+      "ccbpfrpptls": 1,
+      "etard": 1,
+      "paiement": 1,
+      "penalites": 1,
+      "exigibles": 1,
+      "fois": 1,
+      "interet": 1,
+      "legal": 1,
+      "rais": 1,
+      "recouvrement": 1,
+      "indemnites": 1,
+      "forfaitaires": 1,
+      "euros": 1,
+      "jirement": 1,
+      "fin": 1,
+      "mois": 1,
+      "jours": 1
+    },
+    "identifiers": {
+      "LEON0649255102": 1,
+      "C0124900": 2,
+      "0562180178": 1,
+      "0562180995": 1,
+      "202433481": 2,
+      "0468200964": 1,
+      "310600111462": 1,
+      "7630003034490002001720530": 1,
+      "7617807000120542171384041": 1
+    },
+    "amounts": {
+      "10.00": 1,
+      "0.10": 1,
+      "20.00": 3,
+      "36.00": 1,
+      "360.00": 1,
+      "33.36": 3,
+      "0.01": 1,
+      "0.43": 3,
+      "1.00": 1,
+      "22.00": 2,
+      "382.00": 1,
+      "458.92": 1,
+      "382.43": 1,
+      "76.49": 1
+    },
+    "urls": {
+      "psp-profiles.fr": 1,
+      "poids.kg": 1
+    },
+    "emails": {
+      "isotech.france@pspprofil.fr": 1
+    }
+  },
+  "pages": [
+    [
+      "ZI DE LA POMME \n 9 & 10 rue Louis Gay Lussac \n 31250 REVEL \n Tél. 05 62 18 01 78 Fax 05 62 18 09 95 \n email isotech.france@pspprofil.fr Site WEB www.psp-profiles.fr",
+      "MARION MATERIAUX GEDIMAT \n Z-A. du Stade \n 11500 QUILLAN \n FRANCE",
+      "MARION MATERIAUX GEDIMAT",
+      "Livré à MARION MATERIAUX GEDIMAT \n Z.A. du Stade \n 11500 QUILLAN",
+      "Facture",
+      "Page 1/2",
+      "Date Numéro pièce | Client Votre référence \n 04/10/2024 33481 C0124900 Cde 6084 du 30/09/24",
+      "Date Numéro pièce | Client Votre référence Commercial 13 \n 04/10/2024 33481 C0124900 Cde 6084 du 30/09/24 J. LEON 06 49 25 51 02",
+      "Référence Désignation Quantité “ ~ ~ Piece Poids.kg PUHT Montant ) \n A \n Personne à contacter : David BALLESTER Tél 04.68.20.09.64 \n Date de chargement : SEMAINE 40 MESSAGERIE \n OFFRE PROMO : \n Bon de livraison n° 31060 \n 0111462 APPUI INTERMEDIAIRE PVC120mm GAMME BIS 10,000!BOI 0,10 10 500 20,00 36,000 360,00 1 \n Eco-contribution a 33.36 la tonne (NTO) 0,013 33,3600 0,43 \n Boite de 50 piéces \n PORT PLUS VALUE PORT 1,000) UN 22,000 22,00 1 \n Cumul Eco-contribution à 33.36 la tonne 0,43",
+      "Ù Ù | . ’ ’ | Ù Ù \n a Palettes : KG : 20,000 \n Total HT %esc. Escompte Eco-contribution | T.T.C. \n 382,00 0,43 Base T.V.A Taux Montant T.V.A 458.92 EUR \n 5 \n R76 3000 3034 4900 0200 1720 530 BIC : SOGEFRPP L 382,43 20,00 76,49 | Net à payer —— \n R76 1780 7000 1205 4217 1384 041 BIC : CCBPFRPPTLS \n etard de paiement : Pénalités exigibles : 3 fois le taux d'intérêt légal 458 92 \n rais de recouvrement : indemnités forfaitaires de 40 euros ? \n Jirement Fin de Mois + 45 jours 15/12/24"
+    ]
+  ]
+}
