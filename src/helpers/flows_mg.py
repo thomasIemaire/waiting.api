@@ -452,61 +452,378 @@ GLINER2_MODEL_ID = "fastino/gliner2-large-2907"
 
 def build_schema(extractor: GLiNER2):
     return (
-        extractor.create_schema()
-        .structure("seller")
-            .field("name", dtype="str", description="Nom du vendeur/émetteur (en-tête ou footer légal). Ne pas confondre avec Réf/dossier.")
-            .field("tax_id", dtype="str", description="TVA intracom du vendeur (TVA, VAT ID). Ex FR..") 
-            .field("siren", dtype="str", description="SIREN vendeur: 9 chiffres (France)")
-            .field("siret", dtype="str", description="SIRET vendeur: 14 chiffres (France)")
-            .field("email", dtype="str", description="Email vendeur (contact, facturation)")
-            .field("phone", dtype="str", description="Téléphone vendeur")
-        .structure("address_seller")
-            .field("street", dtype="str", description="Adresse vendeur (numéro + voie + compléments) exemple '10bis rue de Paris', ou '464 Boulevard des Tamaris'")
-            .field("city", dtype="str", description="Ville vendeur exemple 'Lyon' ou 'Marseille Cedex 13' ou 'Onet Le Château'")
-            .field("zip_code", dtype="str", description="Code postal vendeur exemple '75008' ou '13013'")
-            .field("country", dtype="str", description="Pays vendeur exemple 'France' ou 'Germany' ou 'FR'")
-        .structure("buyer")
-            .field("name", dtype="str", description="Nom acheteur / facturé à / bill to / client")
-            .field("tax_id", dtype="str", description="TVA intracom acheteur si présente")
-            .field("siren", dtype="str", description="SIREN acheteur si présent")
-            .field("siret", dtype="str", description="SIRET acheteur si présent")
-            .field("email", dtype="str", description="Email acheteur si présent (rare)")
-        .structure("address_buyer")
-            .field("street", dtype="str", description="Adresse acheteur (bill to)")
-            .field("city", dtype="str", description="Ville acheteur")
-            .field("zip_code", dtype="str", description="Code postal acheteur")
-            .field("country", dtype="str", description="Pays acheteur")
-        .structure("order")
-            .field("number", dtype="str", description="Numéro de commande / PO / Purchase order")
-        .structure("customer")
-            .field("number", dtype="str", description="Numéro client / code client / customer ID")
-        .structure("document")
-            .field("number", dtype="str", description="Numéro facture / invoice # / document")
-            .field("type", dtype="str", description="Type doc (Facture/Invoice/Avoir/Credit note)")
-        .structure("items")
-            .field("quantity", dtype="str", description="Quantité ligne")
-            .field("reference", dtype="str", description="Référence/SKU/code article")
-            .field("description", dtype="str", description="Désignation/description article/service")
-            .field("unit_price_excl_tax", dtype="str", description="Prix unitaire HT")
-            .field("tax_rate", dtype="str", description="Taux TVA/VAT rate (ex 20%)")
-            .field("tax_amount", dtype="str", description="Montant TVA ligne si présent")
-            .field("line_total_excl_tax", dtype="str", description="Total ligne HT si présent")
-            .field("line_total_incl_tax", dtype="str", description="Total ligne TTC si présent")
-            .field("discount", dtype="str", description="Remise ligne si présente")
-        .structure("invoice")
-            .field("date", dtype="str", description="Date de facture / invoice date")
-            .field("due_date", dtype="str", description="Date d'échéance / due date")
-            .field("payment_method", dtype="str", description="Mode de règlement / payment method")
-            .field("payment_terms", dtype="str", description="Conditions de paiement (Net 30, 45 JFM...)")
-            .field("total_excl_tax", dtype="str", description="Total HT / subtotal (excl. tax)")
-            .field("tax_base", dtype="str", description="Base TVA / taxable base (assiette)")
-            .field("tax_rate", dtype="str", description="Taux TVA global (si unique)")
-            .field("tax_amount", dtype="str", description="Total TVA/VAT total")
-            .field("total_incl_tax", dtype="str", description="Total TTC / amount due")
-            .field("currency", dtype="str", description="Devise (EUR, USD...) ou symbole")
-            .field("iban", dtype="str", description="IBAN si présent")
-            .field("bic", dtype="str", description="BIC/SWIFT si présent")
+    extractor.create_schema()
+    .structure("seller")
+        .field(
+            "name",
+            dtype="str",
+            description=(
+                "Seller/issuer name (legal header or footer). Do not confuse with Ref/folder. "
+                "Nom du vendeur/émetteur (en-tête ou footer légal). Ne pas confondre avec Réf/dossier."
+            ),
+        )
+        .field(
+            "tax_id",
+            dtype="str",
+            description=(
+                "Seller's intra-community VAT number (VAT, VAT ID), e.g. FR.. "
+                "TVA intracom du vendeur (TVA, VAT ID), ex FR.."
+            ),
+        )
+        .field(
+            "siren",
+            dtype="str",
+            description=(
+                "Seller's SIREN: 9 digits (France). "
+                "SIREN vendeur : 9 chiffres (France)."
+            ),
+        )
+        .field(
+            "siret",
+            dtype="str",
+            description=(
+                "Seller's SIRET: 14 digits (France). "
+                "SIRET vendeur : 14 chiffres (France)."
+            ),
+        )
+        .field(
+            "email",
+            dtype="str",
+            description=(
+                "Seller's email if present. "
+                "Email vendeur si présent."
+            ),
+        )
+        .field(
+            "phone",
+            dtype="str",
+            description=(
+                "Seller's phone number if present. "
+                "Numéro de téléphone vendeur si présent."
+            ),
+        )
+
+    .structure("address_seller")
+        .field(
+            "street",
+            dtype="str",
+            description=(
+                "Seller's address (number + street + additional info), e.g. '10bis rue de Paris' or '464 Boulevard des Tamaris'. "
+                "Adresse vendeur (numéro + voie + compléments), ex. '10bis rue de Paris' ou '464 Boulevard des Tamaris'."
+            ),
+        )
+        .field(
+            "city",
+            dtype="str",
+            description=(
+                "Seller's city, e.g. 'Lyon', 'Marseille Cedex 13', 'Onet Le Château'. "
+                "Ville vendeur, ex. 'Lyon', 'Marseille Cedex 13', 'Onet Le Château'."
+            ),
+        )
+        .field(
+            "zip_code",
+            dtype="str",
+            description=(
+                "Seller's postal code, e.g. '75008' or '13013'. "
+                "Code postal vendeur, ex. '75008' ou '13013'."
+            ),
+        )
+        .field(
+            "country",
+            dtype="str",
+            description=(
+                "Seller's country, e.g. 'France', 'Germany', or 'FR'. "
+                "Pays vendeur, ex. 'France', 'Germany' ou 'FR'."
+            ),
+        )
+
+    .structure("buyer")
+        .field(
+            "name",
+            dtype="str",
+            description=(
+                "Buyer name / billed-to / bill to / customer. "
+                "Nom acheteur / facturé à / bill to / client."
+            ),
+        )
+        .field(
+            "tax_id",
+            dtype="str",
+            description=(
+                "Buyer's intra-community VAT number if present. "
+                "TVA intracom acheteur si présente."
+            ),
+        )
+        .field(
+            "siren",
+            dtype="str",
+            description=(
+                "Buyer's SIREN (9 digits) if present. "
+                "SIREN acheteur (9 chiffres) si présent."
+            ),
+        )
+        .field(
+            "siret",
+            dtype="str",
+            description=(
+                "Buyer's SIRET (14 digits) if present. "
+                "SIRET acheteur (14 chiffres) si présent."
+            ),
+        )
+        .field(
+            "email",
+            dtype="str",
+            description=(
+                "Buyer's email if present (rare). "
+                "Email acheteur si présent (rare)."
+            ),
+        )
+
+    .structure("address_buyer")
+        .field(
+            "street",
+            dtype="str",
+            description=(
+                "Buyer's address (bill to). "
+                "Adresse acheteur (bill to)."
+            ),
+        )
+        .field(
+            "city",
+            dtype="str",
+            description=(
+                "Buyer's city. "
+                "Ville acheteur."
+            ),
+        )
+        .field(
+            "zip_code",
+            dtype="str",
+            description=(
+                "Buyer's postal code. "
+                "Code postal acheteur."
+            ),
+        )
+        .field(
+            "country",
+            dtype="str",
+            description=(
+                "Buyer's country. "
+                "Pays acheteur."
+            ),
+        )
+
+    .structure("order")
+        .field(
+            "number",
+            dtype="str",
+            description=(
+                "Order number / PO / Purchase Order. "
+                "Numéro de commande / PO / Purchase order."
+            ),
+        )
+
+    .structure("customer")
+        .field(
+            "number",
+            dtype="str",
+            description=(
+                "Customer number / customer code / customer ID. "
+                "Numéro client / code client / customer ID."
+            ),
+        )
+
+    .structure("document")
+        .field(
+            "number",
+            dtype="str",
+            description=(
+                "Invoice/document number / invoice #. "
+                "Numéro de facture / invoice # / document."
+            ),
+        )
+        .field(
+            "type",
+            dtype="str",
+            description=(
+                "Document type (Invoice / Credit note / Debit note...). "
+                "Type de document (Facture / Avoir / Note de débit...)."
+            ),
+        )
+
+    .structure("items")
+        .field(
+            "quantity",
+            dtype="str",
+            description=(
+                "Line quantity. "
+                "Quantité ligne."
+            ),
+        )
+        .field(
+            "reference",
+            dtype="str",
+            description=(
+                "Item reference / SKU / item code. "
+                "Référence / SKU / code article."
+            ),
+        )
+        .field(
+            "description",
+            dtype="str",
+            description=(
+                "Item/service description. "
+                "Désignation / description article ou service."
+            ),
+        )
+        .field(
+            "unit_price_excl_tax",
+            dtype="str",
+            description=(
+                "Unit price excluding tax (HT). "
+                "Prix unitaire HT."
+            ),
+        )
+        .field(
+            "tax_rate",
+            dtype="str",
+            description=(
+                "VAT rate (e.g. 20%). "
+                "Taux TVA (ex. 20%)."
+            ),
+        )
+        .field(
+            "tax_amount",
+            dtype="str",
+            description=(
+                "Line VAT amount if present. "
+                "Montant TVA ligne si présent."
+            ),
+        )
+        .field(
+            "line_total_excl_tax",
+            dtype="str",
+            description=(
+                "Line total excluding tax (HT) if present. "
+                "Total ligne HT si présent."
+            ),
+        )
+        .field(
+            "line_total_incl_tax",
+            dtype="str",
+            description=(
+                "Line total including tax (TTC) if present. "
+                "Total ligne TTC si présent."
+            ),
+        )
+        .field(
+            "discount",
+            dtype="str",
+            description=(
+                "Line discount if present. "
+                "Remise ligne si présente."
+            ),
+        )
+
+    .structure("invoice")
+        .field(
+            "date",
+            dtype="str",
+            description=(
+                "Invoice date. "
+                "Date de facture."
+            ),
+        )
+        .field(
+            "due_date",
+            dtype="str",
+            description=(
+                "Due date / payment due date. "
+                "Date d'échéance."
+            ),
+        )
+        .field(
+            "payment_method",
+            dtype="str",
+            description=(
+                "Payment method. "
+                "Mode de règlement."
+            ),
+        )
+        .field(
+            "payment_terms",
+            dtype="str",
+            description=(
+                "Payment terms (e.g., Net 30, Net 45, 45 JFM...). "
+                "Conditions de paiement (ex. Net 30, Net 45, 45 JFM...)."
+            ),
+        )
+        .field(
+            "total_excl_tax",
+            dtype="str",
+            description=(
+                "Subtotal / total excluding tax (HT). "
+                "Total HT / sous-total."
+            ),
+        )
+        .field(
+            "tax_base",
+            dtype="str",
+            description=(
+                "Taxable base (VAT base). "
+                "Base TVA / assiette taxable."
+            ),
+        )
+        .field(
+            "tax_rate",
+            dtype="str",
+            description=(
+                "Overall VAT rate if single rate applies. "
+                "Taux TVA global si taux unique."
+            ),
+        )
+        .field(
+            "tax_amount",
+            dtype="str",
+            description=(
+                "Total VAT amount. "
+                "Montant total TVA."
+            ),
+        )
+        .field(
+            "total_incl_tax",
+            dtype="str",
+            description=(
+                "Total including tax (TTC) / amount due. "
+                "Total TTC / montant à payer."
+            ),
+        )
+        .field(
+            "currency",
+            dtype="str",
+            description=(
+                "Currency code or symbol (EUR, USD, €, $...). "
+                "Devise (EUR, USD...) ou symbole."
+            ),
+        )
+        .field(
+            "iban",
+            dtype="str",
+            description=(
+                "IBAN if present. "
+                "IBAN si présent."
+            ),
+        )
+        .field(
+            "bic",
+            dtype="str",
+            description=(
+                "BIC/SWIFT if present. "
+                "BIC/SWIFT si présent."
+            ),
+        )
     )
+
 
 
 RE_SIREN = re.compile(r"\b\d{9}\b")
