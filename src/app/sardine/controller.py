@@ -63,4 +63,23 @@ def create_sardine_router(db: Database) -> Blueprint:
         except Exception as e:
             return json_error(str(e), 400)
 
+    @bp.delete("/document")
+    @jwt_required()
+    def delete_document():
+        try:
+            filename = request.args.get("filename")
+            classification = request.args.get("classification")
+            
+            if not filename or not classification:
+                return json_error("Filename and classification required", 400)
+
+            success = service.delete_document(filename, classification)
+            
+            if success:
+                return jsonify({"success": True}), 200
+            else:
+                return json_error("Document not found", 404)
+        except Exception as e:
+            return json_error(str(e), 500)
+
     return bp

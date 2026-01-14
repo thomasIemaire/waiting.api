@@ -110,50 +110,47 @@ class SardineService(BaseService):
         return image
     
     def save_document(self, data: dict, user_id: str) -> dict:
-        """Sauvegarde une page spécifique d'un document"""
-        # Construction du nom de fichier avec le suffixe de page si nécessaire
+        """Sauvegarde le fichier ORIGINAL (PDF/Image) et les zones"""
         filename = data.get("filename")
+        classification = data.get("classification")
         
         doc = {
             "filename": filename,
-            "classification": data.get("classification"),
-            "base64": data.get("base64"), # On stocke l'image de la page
+            "classification": classification,
+            "base64": data.get("base64"),       # Fichier original
+            "mime_type": data.get("mime_type"), # Type (pdf/image)
+            "page_index": data.get("page_index", 0), # Numéro de page
             "zones": data.get("zones", []),
             "width": data.get("width"),
             "height": data.get("height"),
             "user_id": user_id,
-            "created_at": datetime.datetime.utcnow(),
             "updated_at": datetime.datetime.utcnow()
         }
 
-        # On écrase si le fichier existe déjà pour cette classification (update)
-        # ou on crée un nouveau
+        # Upsert basé sur le nom ET la classification
         self.documents.update_one(
-            {"filename": filename, "classification": data.get("classification")},
-            {"$set": doc},
+            {"filename": filename, "classification": classification},
+            {"$set": doc, "$setOnInsert": {"created_at": datetime.datetime.utcnow()}},
             upsert=True
         )
         return {"success": True, "filename": filename}
 
     def get_documents_tree(self, user_id: str) -> dict:
-        """Récupère l'arborescence : Classifications -> Fichiers"""
-        
-        # 1. Récupérer toutes les classifications OFFICIELLES
+        """Construit l'arbre : Classification -> Liste de fichiers"""
+        # 1. Initialiser avec les dossiers existants (même vides)
         class_cursor = self.classifications.find({})
-        tree = {c["name"]: [] for c in class_cursor}
+        tree = {c["name"]: [] for c in class_cursor if "name" in c}
 
-        # 2. Récupérer les documents
+        # 2. Remplir avec les documents (sans charger le lourd base64)
         docs_cursor = self.documents.find({}, {"base64": 0}) 
 
         for doc in docs_cursor:
-            classification = doc.get("classification")
-            
-            # MODIFICATION ICI :
-            # On vérifie que 'classification' existe ET qu'elle fait partie des clés de l'arbre (donc qu'elle existe officiellement)
-            # Si le document n'a pas de classification ou si elle est inconnue, on l'ignore.
-            if classification and classification in tree:
-                tree[classification].append({
+            cls = doc.get("classification")
+            # On ajoute le fichier seulement si sa classification existe dans l'arbre
+            if cls and cls in tree:
+                tree[cls].append({
                     "name": doc.get("filename"),
+                    "page": doc.get("page_index", 0) + 1,
                     "zones_count": len(doc.get("zones", [])),
                     "_id": str(doc.get("_id"))
                 })
@@ -161,19 +158,22 @@ class SardineService(BaseService):
         return tree
 
     def get_document_content(self, filename: str, classification: str) -> dict:
-        """Récupère un document complet avec son image base64"""
         doc = self.documents.find_one({"filename": filename, "classification": classification})
         if doc:
             doc["_id"] = str(doc["_id"])
             return doc
         return None
 
-    def create_classification(self, name: str) -> dict:
-        if not name:
-            raise ValueError("Name required")
-        
-        if self.classifications.find_one({"name": name}):
-             raise ValueError("Classification already exists")
+    def delete_document(self, filename: str, classification: str) -> bool:
+        """Supprime un document de la base de données"""
+        result = self.documents.delete_one({
+            "filename": filename, 
+            "classification": classification
+        })
+        return result.deleted_count > 0
 
+    def create_classification(self, name: str) -> dict:
+        if not name: raise ValueError("Name required")
+        if self.classifications.find_one({"name": name}): raise ValueError("Exists")
         self.classifications.insert_one({"name": name, "created_at": datetime.datetime.utcnow()})
         return {"name": name}
