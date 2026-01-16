@@ -2,6 +2,7 @@ import base64
 import numpy as np
 import cv2
 import datetime
+import re
 from src.helpers.base_service import BaseService
 from pymongo.database import Database
 
@@ -112,6 +113,15 @@ class SardineService(BaseService):
     def save_document(self, data: dict, user_id: str) -> dict:
         """Sauvegarde le fichier ORIGINAL (PDF/Image) et les zones"""
         filename = data.get("filename")
+        page_index = data.get("page_index", 0)
+
+        try:
+            filename = re.search(r'^(.*)_\d.*$', filename).group(1)
+        except Exception:
+            pass
+
+        filename = f"{filename}_{page_index}"
+
         classification = data.get("classification")
         
         doc = {
@@ -119,7 +129,7 @@ class SardineService(BaseService):
             "classification": classification,
             "base64": data.get("base64"),       # Fichier original
             "mime_type": data.get("mime_type"), # Type (pdf/image)
-            "page_index": data.get("page_index", 0), # Numéro de page
+            "page_index": page_index,
             "zones": data.get("zones", []),
             "width": data.get("width"),
             "height": data.get("height"),
