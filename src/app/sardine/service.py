@@ -129,7 +129,7 @@ class SardineService(BaseService):
             "classification": classification,
             "base64": data.get("base64"),       # Fichier original
             "mime_type": data.get("mime_type"), # Type (pdf/image)
-            "page_index": page_index,
+            "page_index": page_index-1,
             "zones": data.get("zones", []),
             "width": data.get("width"),
             "height": data.get("height"),
