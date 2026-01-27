@@ -73,6 +73,9 @@ def _register_blueprints(app: Flask, db: Database) -> None:
     from src.app.flows import create_flows_router
     api_bp.register_blueprint(create_flows_router(db), url_prefix="/flows")
 
+    from src.app.sardine import create_sardine_router
+    api_bp.register_blueprint(create_sardine_router(db), url_prefix="/sardine")
+
     app.register_blueprint(swaggerui_bp)
     app.register_blueprint(api_bp)
 
