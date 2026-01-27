@@ -6,7 +6,7 @@ cors = CORS()
 jwt = JWTManager()
 
 swaggerui_bp = get_swaggerui_blueprint(
-    '/swagger',
-    '/static/swagger.json',
-    config={'app_name': "Sardine's API"}
+    "/swagger",
+    "/static/swagger.json",
+    config={"app_name": "Sardine's API"},
 )

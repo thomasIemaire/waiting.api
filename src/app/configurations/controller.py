@@ -12,7 +12,7 @@ def create_configurations_router(db: Database) -> Blueprint:
     @bp.get("/")
     @jwt_required()
     def find_configurations():
-        docs = service.dao.find_all()
+        docs = service.find_all()
         if not docs:
             return json_error("Not found", 404)
         return jsonify(docs), 200
@@ -25,12 +25,35 @@ def create_configurations_router(db: Database) -> Blueprint:
             return json_error("Bad request")
         configuration = service.create(payload, user_id=get_jwt_identity())
         return jsonify(configuration), 201
+
+    @bp.put("/<id>")
+    @jwt_required()
+    def update_configuration(id):
+        payload = request.get_json(silent=True)
+        if not payload:
+            return json_error("Bad request")
+        try:
+            # On passe id et payload
+            updated = service.update(config_id=id, data=payload)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify(updated), 200
+    
+    @bp.delete("/<id>")
+    @jwt_required()
+    def delete_configuration(id):
+        try:
+            service.delete_configuration(config_id=id)
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"status": "deleted"}), 200
     
     @bp.get("/<id>")
     @jwt_required()
     def get_configuration(id):
-        doc = service.get_document(id=id)
-        if not doc:
+        try:
+            doc = service.get_configuration(config_id=id)
+        except ValueError:
             return json_error("Not found", 404)
         return jsonify(doc), 200
 

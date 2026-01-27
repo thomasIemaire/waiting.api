@@ -12,7 +12,10 @@ def create_documents_router(db: Database) -> Blueprint:
     @bp.get("/")
     @jwt_required()
     def find_documents():
-        return jsonify(service.find_documents_by_user_id(user_id=get_jwt_identity())), 200
+        docs = service.find_documents_by_user_id(user_id=get_jwt_identity())
+        if not docs:
+            return json_error("Not found", 404)
+        return jsonify(docs), 200
     
     @bp.post("/")
     @jwt_required()
@@ -23,13 +26,18 @@ def create_documents_router(db: Database) -> Blueprint:
             return jsonify(document), 201
         except ValueError as ve:
             return json_error(str(ve), 400)
+        except RuntimeError as err:
+            return json_error(str(err), 500)
     
     @bp.get("/<string:document_id>")
     @jwt_required()
     def get_document(document_id: str):
-        document = service.find_document(document_id=document_id, user_id=get_jwt_identity())
-        if not document:
-            return json_error("Document not found", 404)
+        try:
+            document = service.find_document(document_id=document_id, user_id=get_jwt_identity())
+        except ValueError as err:
+            return json_error(str(err), 404)
+        except RuntimeError as err:
+            return json_error(str(err), 500)
         return jsonify(document), 200
 
     return bp

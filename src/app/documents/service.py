@@ -1,15 +1,14 @@
-from pyparsing import Optional
+import base64
+import os
+from typing import Optional
+
 from pymongo.database import Database
-import os, base64
-
-from src.app.users.service import UsersService
-from src.helpers.avatar import generate_avatar, save_avatar
-from src.helpers import utils
-
-from src.helpers.base_service import BaseService
 
 from src.app.documents.dao import DocumentsDao
+from src.app.users.service import UsersService
 from src.helpers import documents as doc_utils
+from src.helpers import utils
+from src.helpers.base_service import BaseService
 
 class DocumentsService(BaseService):
 
@@ -37,10 +36,8 @@ class DocumentsService(BaseService):
                 "created_at": 1,
             },
         )
-        if not document:
-            raise ValueError("Document introuvable")
         
-        if not user_id == str(document.get("created_by", {}).get("_id")):
+        if str(document.get("created_by", {}).get("_id")) != user_id:
             raise ValueError("Accès refusé au document")
 
         storage = document.get("storage") or {}
@@ -52,7 +49,7 @@ class DocumentsService(BaseService):
             raw = f.read()
         b64 = base64.b64encode(raw).decode("ascii")
 
-        response = { **self.dao.serialize(document), "data": b64 }
+        response = {**self.dao.serialize(document), "data": b64}
 
         return response
 
@@ -86,16 +83,17 @@ class DocumentsService(BaseService):
             "storage": {"type": "disk", "path": None},
         }
 
-        insert_result = self.dao.insert_one(doc)
-        doc_id = getattr(insert_result, "inserted_id", None) or doc.get("_id")
+        self.dao.insert_one(doc)
+        doc_id = doc.get("_id")
         if not doc_id:
             raise RuntimeError("Impossible de récupérer l'id du document inséré")
+        doc_id_str = str(doc_id)
 
         base_dir = os.path.join("..", "sardine.documents", str(user_id))
         os.makedirs(base_dir, exist_ok=True)
 
         ext = doc_utils._ext_from(content_type, filename)
-        safe_name = f"{str(doc_id)}{ext}" if ext else f"{str(doc_id)}"
+        safe_name = f"{doc_id_str}{ext}" if ext else doc_id_str
         file_path = os.path.join(base_dir, safe_name)
 
         try:
@@ -112,5 +110,5 @@ class DocumentsService(BaseService):
             {"storage": {"type": "disk", "path": file_path}}
         )
 
-        saved = self.get_document(id=str(doc_id))
-        return self.dao.serialize(saved)
+        saved = self.get_document(id=doc_id_str)
+        return saved

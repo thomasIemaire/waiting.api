@@ -17,15 +17,28 @@ def create_users_router(db: Database) -> Blueprint:
     @bp.get("/me")
     @jwt_required()
     def find_me():
-        user = service.find_user_by_id(get_jwt_identity())
-        if not user:
+        try:
+            user = service.find_user_by_id(get_jwt_identity())
+        except ValueError:
             return json_error("Not found", 404)
         return jsonify(user), 200
     
     @bp.put("/me/avatar")
     @jwt_required()
     def update_my_avatar():
-        service.update_avatar(get_jwt_identity())
+        try:
+            service.update_avatar(get_jwt_identity())
+        except ValueError:
+            return json_error("Not found", 404)
         return jsonify({"message": "Avatar mis à jour"}), 200
+
+    @bp.delete("/me")
+    @jwt_required()
+    def restore_user():
+        try:
+            service.restore_user(user_id=get_jwt_identity())
+        except ValueError:
+            return json_error("Not found", 404)
+        return jsonify({"message": "Restored user"}), 200
 
     return bp
